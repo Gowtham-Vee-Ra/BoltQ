@@ -6,41 +6,22 @@ import (
 	"io/ioutil"
 	"net/http"
 
+	"BoltQ/internal/job"
+	"BoltQ/internal/queue"
 	"BoltQ/pkg/logger"
 )
 
-// JobQueue defines the interface for a queue implementation
-type JobQueue interface {
-	Publish(task string) error
-	Consume() (string, error)
-}
-
-// JobHandler handles job-related API requests
+// JobHandler handles job-related API endpoints
 type JobHandler struct {
-	queue JobQueue
+	queue *queue.RedisQueue
 }
 
-// NewJobHandler creates a new JobHandler with the given queue
-func NewJobHandler(queue JobQueue) *JobHandler {
-	return &JobHandler{queue: queue}
+// NewJobHandler creates a new job handler
+func NewJobHandler(q *queue.RedisQueue) *JobHandler {
+	return &JobHandler{queue: q}
 }
 
-// Job represents a task to be processed
-type Job struct {
-	ID       string                 `json:"id,omitempty"`
-	Type     string                 `json:"type"`
-	Payload  map[string]interface{} `json:"payload"`
-	Priority int                    `json:"priority,omitempty"`
-}
-
-// JobResponse is the API response for job operations
-type JobResponse struct {
-	Success bool   `json:"success"`
-	JobID   string `json:"job_id,omitempty"`
-	Message string `json:"message,omitempty"`
-}
-
-// SubmitJobHandler processes job submission requests
+// SubmitJobHandler handles job submission requests
 func (h *JobHandler) SubmitJobHandler(w http.ResponseWriter, r *http.Request) {
 	// Only accept POST requests
 	if r.Method != http.MethodPost {
@@ -55,73 +36,116 @@ func (h *JobHandler) SubmitJobHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the job data
-	var job Job
-	if err := json.Unmarshal(body, &job); err != nil {
+	// Parse the request
+	var request struct {
+		Type        string                 `json:"type"`
+		Payload     map[string]interface{} `json:"payload"`
+		MaxAttempts int                    `json:"max_attempts,omitempty"`
+	}
+
+	err = json.Unmarshal(body, &request)
+	if err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	// Validate the job
-	if job.Type == "" {
+	// Validate request
+	if request.Type == "" {
 		http.Error(w, "Job type is required", http.StatusBadRequest)
 		return
 	}
 
-	// Generate a job ID if not provided
-	if job.ID == "" {
-		job.ID = fmt.Sprintf("job_%d", generateJobID())
+	// Create a new job
+	j := job.NewJob(request.Type, request.Payload)
+
+	// Set max attempts if provided
+	if request.MaxAttempts > 0 {
+		j.MaxAttempts = request.MaxAttempts
 	}
 
-	// Convert the job to JSON
-	jobJSON, err := json.Marshal(job)
+	// Add the job to the queue
+	err = h.queue.PublishJob(j)
 	if err != nil {
-		http.Error(w, "Error serializing job", http.StatusInternalServerError)
+		errMsg := fmt.Sprintf("Error publishing job: %v", err)
+		logger.Error(&errMsg)
+		http.Error(w, "Error processing job", http.StatusInternalServerError)
 		return
 	}
 
-	// Publish the job to the queue
-	err = h.queue.Publish(string(jobJSON))
-	if err != nil {
-		errorMsg := fmt.Sprintf("Failed to queue job: %v", err)
-		logger.Error(errorMsg)
-		http.Error(w, "Error queuing job", http.StatusInternalServerError)
-		return
+	// Return the job ID
+	response := map[string]string{
+		"job_id": j.ID,
+		"status": string(j.Status),
 	}
 
-	// Log the job submission
-	logMsg := fmt.Sprintf("Job submitted: %s", job.ID)
-	logger.Info(logMsg)
-
-	// Return a success response
-	response := JobResponse{
-		Success: true,
-		JobID:   job.ID,
-		Message: "Job submitted successfully",
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "Error generating response", http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(response)
+	w.Write(responseJSON)
 }
 
-// JobStatusHandler retrieves the status of a job
-func (h *JobHandler) JobStatusHandler(w http.ResponseWriter, r *http.Request) {
-	// For Phase 1, we'll return a simple message
-	// This will be expanded in Phase 2 with actual status tracking
+// GetJobStatusHandler handles job status requests
+func (h *JobHandler) GetJobStatusHandler(w http.ResponseWriter, r *http.Request) {
+	// Only accept GET requests
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract job ID from query parameters
+	jobID := r.URL.Query().Get("id")
+	if jobID == "" {
+		http.Error(w, "Job ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get job status
+	j, err := h.queue.GetJobStatus(jobID)
+	if err != nil {
+		http.Error(w, "Job not found", http.StatusNotFound)
+		return
+	}
+
+	// Return the job status
+	responseJSON, err := json.Marshal(j)
+	if err != nil {
+		http.Error(w, "Error generating response", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	response := JobResponse{
-		Success: true,
-		Message: "Status feature will be implemented in Phase 2",
-	}
-	json.NewEncoder(w).Encode(response)
+	w.WriteHeader(http.StatusOK)
+	w.Write(responseJSON)
 }
 
-// Simple ID generator - would be replaced with UUID in production
-var jobCounter int64 = 0
+// GetQueueStatsHandler returns statistics about the job queues
+func (h *JobHandler) GetQueueStatsHandler(w http.ResponseWriter, r *http.Request) {
+	// Only accept GET requests
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-func generateJobID() int64 {
-	jobCounter++
-	return jobCounter
+	// Get queue statistics
+	counts, err := h.queue.CountJobs()
+	if err != nil {
+		http.Error(w, "Error fetching queue stats", http.StatusInternalServerError)
+		return
+	}
+
+	// Return the queue statistics
+	responseJSON, err := json.Marshal(counts)
+	if err != nil {
+		http.Error(w, "Error generating response", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(responseJSON)
 }

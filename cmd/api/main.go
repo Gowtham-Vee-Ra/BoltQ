@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 
 	"BoltQ/internal/api"
@@ -14,32 +13,53 @@ import (
 )
 
 func main() {
+	// Load .env file if it exists
 	err := godotenv.Load()
 	if err != nil {
-		log.Println("Warning: .env file not found or error loading it")
+		// Only log as info, not error, since .env file is optional
+		msg := "No .env file found, using environment variables"
+		logger.Info(&msg)
+	} else {
+		msg := ".env file loaded successfully"
+		logger.Info(&msg)
 	}
 
-	// Initialize the Redis queue
-	redisQueue := queue.NewRedisQueue()
+	// Log startup
+	startupMsg := "Starting Job API Service..."
+	logger.Info(&startupMsg)
 
-	// Create API handlers with the queue
+	// Load configuration
+	redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
+	apiPort := config.GetEnv("API_PORT", "8080")
+
+	// Initialize Redis queue
+	redisQueue := queue.NewRedisQueue(redisAddr)
+
+	// Initialize job handler
 	jobHandler := api.NewJobHandler(redisQueue)
 
-	// Set up routes
+	// Set up HTTP routes
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("BoltQ API Running!"))
 	})
 
-	http.HandleFunc("/submit", jobHandler.SubmitJobHandler)
-	http.HandleFunc("/status", jobHandler.JobStatusHandler)
+	// Job submission endpoint
+	http.HandleFunc("/api/jobs", jobHandler.SubmitJobHandler)
 
-	// Get port from environment or use default
-	port := config.GetEnv("PORT", "8080")
+	// Job status endpoint
+	http.HandleFunc("/api/jobs/status", jobHandler.GetJobStatusHandler)
+
+	// Queue stats endpoint
+	http.HandleFunc("/api/stats", jobHandler.GetQueueStatsHandler)
 
 	// Start the server
-	serverAddr := fmt.Sprintf(":%s", port)
-	msg := fmt.Sprintf("Starting Job API Service on port %s...", port)
-	logger.Info(msg)
+	serverMsg := fmt.Sprintf("API server listening on port %s", apiPort)
+	logger.Info(&serverMsg)
 
-	log.Fatal(http.ListenAndServe(serverAddr, nil))
+	err = http.ListenAndServe(":"+apiPort, nil)
+	if err != nil {
+		errMsg := fmt.Sprintf("Error starting server: %v", err)
+		logger.Error(&errMsg)
+		panic(err)
+	}
 }

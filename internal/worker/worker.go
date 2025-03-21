@@ -1,80 +1,151 @@
 package worker
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
+	"BoltQ/internal/job"
+	"BoltQ/internal/queue"
 	"BoltQ/pkg/logger"
 )
 
-// Job represents a task to be processed
-type Job struct {
-	ID       string                 `json:"id"`
-	Type     string                 `json:"type"`
-	Payload  map[string]interface{} `json:"payload"`
-	Priority int                    `json:"priority,omitempty"`
+// Worker represents a job processor
+type Worker struct {
+	ID         string
+	queue      *queue.RedisQueue
+	processors map[string]JobProcessor
+	shutdown   chan bool
 }
 
-// ProcessTask handles the execution of a task
-func ProcessTask(taskJSON *string) {
-	// Parse the job
-	var job Job
-	if err := json.Unmarshal([]byte(*taskJSON), &job); err != nil {
-		errorMsg := fmt.Sprintf("Error parsing job: %v", err)
-		logger.Error(errorMsg)
+// JobProcessor is a function that processes a specific type of job
+type JobProcessor func(*job.Job) error
+
+// NewWorker creates a new worker
+func NewWorker(id string, q *queue.RedisQueue) *Worker {
+	return &Worker{
+		ID:         id,
+		queue:      q,
+		processors: make(map[string]JobProcessor),
+		shutdown:   make(chan bool),
+	}
+}
+
+// RegisterProcessor registers a processor for a specific job type
+func (w *Worker) RegisterProcessor(jobType string, processor JobProcessor) {
+	w.processors[jobType] = processor
+}
+
+// Start begins the worker processing loop
+func (w *Worker) Start() {
+	msg := fmt.Sprintf("Worker %s started", w.ID)
+	logger.Info(&msg)
+
+	go w.processLoop()
+}
+
+// Stop signals the worker to shut down
+func (w *Worker) Stop() {
+	w.shutdown <- true
+	msg := fmt.Sprintf("Worker %s stopped", w.ID)
+	logger.Info(&msg)
+}
+
+// processLoop continuously polls for jobs and processes them
+func (w *Worker) processLoop() {
+	for {
+		select {
+		case <-w.shutdown:
+			return
+		default:
+			w.processSingleJob()
+			time.Sleep(100 * time.Millisecond) // Small delay to prevent CPU spinning
+		}
+	}
+}
+
+// processSingleJob processes a single job from the queue
+func (w *Worker) processSingleJob() {
+	j, err := w.queue.ConsumeJob()
+	if err != nil {
+		errMsg := fmt.Sprintf("Error consuming job: %v", err)
+		logger.Error(&errMsg)
 		return
 	}
 
-	// Log the start of processing
-	startMsg := fmt.Sprintf("Started processing job: %s", job.ID)
-	logger.Info(startMsg)
-
-	// Process different job types
-	switch job.Type {
-	case "email":
-		processEmailJob(job)
-	case "notification":
-		processNotificationJob(job)
-	case "data_processing":
-		processDataJob(job)
-	default:
-		// Process generic job type
-		processGenericJob(job)
+	if j == nil {
+		// No job available
+		return
 	}
 
-	// Log completion
-	completeMsg := fmt.Sprintf("Job completed: %s", job.ID)
-	logger.Info(completeMsg)
+	w.processJob(j)
 }
 
-// Process an email job
-func processEmailJob(job Job) {
-	recipient, _ := job.Payload["recipient"].(string)
-	fmt.Printf("Sending email to %s\n", recipient)
-	// Simulate work
-	time.Sleep(1 * time.Second)
+// processJob handles the processing of a job
+func (w *Worker) processJob(j *job.Job) {
+	startMsg := fmt.Sprintf("Worker %s processing job %s (type: %s)", w.ID, j.ID, j.Type)
+	logger.Info(&startMsg)
+
+	// Mark job as running
+	j.MarkRunning()
+	err := w.queue.UpdateJobStatus(j)
+	if err != nil {
+		errMsg := fmt.Sprintf("Error updating job status: %v", err)
+		logger.Error(&errMsg)
+	}
+
+	// Find the processor for this job type
+	processor, exists := w.processors[j.Type]
+	if !exists {
+		errMsg := fmt.Sprintf("No processor registered for job type: %s", j.Type)
+		logger.Error(&errMsg)
+		j.MarkFailed(errMsg)
+		w.handleFailedJob(j, fmt.Errorf(errMsg))
+		return
+	}
+
+	// Process the job
+	err = processor(j)
+	if err != nil {
+		errMsg := fmt.Sprintf("Job %s failed: %v", j.ID, err)
+		logger.Error(&errMsg)
+		j.MarkFailed(err.Error())
+		w.handleFailedJob(j, err)
+		return
+	}
+
+	// Job succeeded
+	j.MarkCompleted()
+	err = w.queue.UpdateJobStatus(j)
+	if err != nil {
+		errMsg := fmt.Sprintf("Error updating job status: %v", err)
+		logger.Error(&errMsg)
+	}
+
+	completeMsg := fmt.Sprintf("Worker %s completed job %s", w.ID, j.ID)
+	logger.Info(&completeMsg)
 }
 
-// Process a notification job
-func processNotificationJob(job Job) {
-	userID, _ := job.Payload["user_id"].(string)
-	message, _ := job.Payload["message"].(string)
-	fmt.Printf("Sending notification to user %s: %s\n", userID, message)
-	// Simulate work
-	time.Sleep(500 * time.Millisecond)
-}
+// handleFailedJob determines what to do with a failed job
+func (w *Worker) handleFailedJob(j *job.Job, err error) {
+	if j.ShouldRetry() {
+		retryMsg := fmt.Sprintf("Scheduling job %s for retry (%d/%d)", j.ID, j.Attempts+1, j.MaxAttempts)
+		logger.Info(&retryMsg)
 
-// Process a data processing job
-func processDataJob(job Job) {
-	fmt.Println("Processing data job")
-	// Simulate heavier work
-	time.Sleep(2 * time.Second)
-}
+		retryErr := w.queue.RetryJob(j)
+		if retryErr != nil {
+			errMsg := fmt.Sprintf("Error scheduling retry: %v", retryErr)
+			logger.Error(&errMsg)
+		}
+	} else {
+		deadLetterMsg := fmt.Sprintf("Moving job %s to dead letter queue after %d failed attempts", j.ID, j.Attempts)
+		logger.Info(&deadLetterMsg)
 
-// Process a generic job
-func processGenericJob(job Job) {
-	fmt.Printf("Processing generic job: %s\n", job.ID)
-	// Simulate work
-	time.Sleep(1 * time.Second)
+		// Update status and move to dead letter queue
+		j.Status = job.StatusDeadLetter
+		dlqErr := w.queue.RetryJob(j)
+		if dlqErr != nil {
+			errMsg := fmt.Sprintf("Error moving to dead letter queue: %v", dlqErr)
+			logger.Error(&errMsg)
+		}
+	}
 }

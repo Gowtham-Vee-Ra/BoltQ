@@ -1,14 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"BoltQ/internal/job"
 	"BoltQ/internal/queue"
 	"BoltQ/internal/worker"
 	"BoltQ/pkg/config"
@@ -17,75 +16,85 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Job represents a task to be processed
-type Job struct {
-	ID       string                 `json:"id"`
-	Type     string                 `json:"type"`
-	Payload  map[string]interface{} `json:"payload"`
-	Priority int                    `json:"priority,omitempty"`
+// Example job processor function
+func processGenericJob(j *job.Job) error {
+	msg := fmt.Sprintf("Processing job: %s with payload: %v", j.ID, j.Payload)
+	logger.Info(&msg)
+
+	// Simulate work
+	time.Sleep(2 * time.Second)
+
+	// For testing error handling, uncomment this to make some jobs fail
+	// if rand.Intn(10) < 3 { // 30% chance of failure
+	//     return fmt.Errorf("simulated random error")
+	// }
+
+	return nil
+}
+
+// Example email job processor
+func processEmailJob(j *job.Job) error {
+	recipient, ok := j.Payload["recipient"].(string)
+	if !ok {
+		return fmt.Errorf("missing or invalid recipient")
+	}
+
+	subject, ok := j.Payload["subject"].(string)
+	if !ok {
+		return fmt.Errorf("missing or invalid subject")
+	}
+
+	msg := fmt.Sprintf("Sending email to %s with subject: %s", recipient, subject)
+	logger.Info(&msg)
+
+	// Simulate sending email
+	time.Sleep(1 * time.Second)
+
+	return nil
 }
 
 func main() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Println("Warning: .env file not found or error loading it")
+		// Only log as info, not error, since .env file is optional
+		msg := "No .env file found, using environment variables"
+		logger.Info(&msg)
+	} else {
+		msg := ".env file loaded successfully"
+		logger.Info(&msg)
 	}
 
-	fmt.Println("Worker service started...")
+	// Log startup
+	startupMsg := "Worker service starting..."
+	logger.Info(&startupMsg)
 
-	// Initialize the Redis queue
-	redisQueue := queue.NewRedisQueue()
+	// Load configuration
+	redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
+	workerID := config.GetEnv("WORKER_ID", fmt.Sprintf("worker-%d", time.Now().UnixNano()))
 
-	// Create a channel to handle graceful shutdown
-	shutdown := make(chan os.Signal, 1)
-	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
+	// Initialize Redis queue
+	redisQueue := queue.NewRedisQueue(redisAddr)
 
-	// Set polling interval from environment or use default
-	pollingInterval := config.GetEnv("POLLING_INTERVAL", "1")
-	interval, err := time.ParseDuration(pollingInterval + "s")
-	if err != nil {
-		interval = 1 * time.Second
-	}
+	// Create worker
+	w := worker.NewWorker(workerID, redisQueue)
 
-	// Start the worker loop
-	go startWorker(redisQueue, interval)
+	// Register job processors
+	w.RegisterProcessor("generic", processGenericJob)
+	w.RegisterProcessor("email", processEmailJob)
 
-	// Wait for shutdown signal
-	<-shutdown
-	fmt.Println("Shutting down worker...")
-}
+	// Start worker
+	w.Start()
 
-func startWorker(q *queue.RedisQueue, interval time.Duration) {
-	for {
-		// Try to get a job from the queue
-		jobJSON, err := q.Consume()
-		if err != nil {
-			// If no job is available, wait before polling again
-			if err.Error() == "redis: nil" {
-				time.Sleep(interval)
-				continue
-			}
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-			// Log other errors
-			errorMsg := fmt.Sprintf("Error consuming from queue: %v", err)
-			logger.Error(errorMsg)
-			time.Sleep(interval)
-			continue
-		}
+	// Wait for termination signal
+	<-sigChan
 
-		// Parse the job
-		var job Job
-		if err := json.Unmarshal([]byte(jobJSON), &job); err != nil {
-			errorMsg := fmt.Sprintf("Error parsing job: %v", err)
-			logger.Error(errorMsg)
-			continue
-		}
+	// Shut down worker
+	w.Stop()
 
-		// Log job processing
-		infoMsg := fmt.Sprintf("Processing job: %s, type: %s", job.ID, job.Type)
-		logger.Info(infoMsg)
-
-		// Process the job
-		worker.ProcessTask(&jobJSON)
-	}
+	shutdownMsg := "Worker service shut down gracefully"
+	logger.Info(&shutdownMsg)
 }
