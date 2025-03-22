@@ -2,60 +2,73 @@
 package worker
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"BoltQ/internal/job"
 	"BoltQ/internal/queue"
 	"BoltQ/pkg/logger"
+	"BoltQ/pkg/metrics"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Worker represents a job processor
 type Worker struct {
 	ID         string
-	queue      *queue.RedisQueue
-	processors map[string]JobProcessor
-	shutdown   chan bool
+	queue      queue.Queue
+	processors map[string]func(ctx context.Context, j *job.Job) error // Using anonymous function type instead
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	logger     *logger.Logger
 }
 
-// JobProcessor is a function that processes a specific type of job
-type JobProcessor func(*job.Job) error
-
 // NewWorker creates a new worker
-func NewWorker(id string, q *queue.RedisQueue) *Worker {
+func NewWorker(id string, q queue.Queue) *Worker {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return &Worker{
 		ID:         id,
 		queue:      q,
-		processors: make(map[string]JobProcessor),
-		shutdown:   make(chan bool),
+		processors: make(map[string]func(ctx context.Context, j *job.Job) error),
+		ctx:        ctx,
+		cancel:     cancel,
+		logger:     logger.NewLogger(fmt.Sprintf("worker-%s", id)),
 	}
 }
 
 // RegisterProcessor registers a processor for a specific job type
-func (w *Worker) RegisterProcessor(jobType string, processor JobProcessor) {
+func (w *Worker) RegisterProcessor(jobType string, processor func(ctx context.Context, j *job.Job) error) {
 	w.processors[jobType] = processor
+	w.logger.Info(fmt.Sprintf("Registered processor for job type: %s", jobType))
 }
 
 // Start begins the worker processing loop
 func (w *Worker) Start() {
-	msg := fmt.Sprintf("Worker %s started", w.ID)
-	logger.Info(msg)
+	w.logger.Info("Worker started")
 
+	w.wg.Add(1)
 	go w.processLoop()
 }
 
 // Stop signals the worker to shut down
 func (w *Worker) Stop() {
-	w.shutdown <- true
-	msg := fmt.Sprintf("Worker %s stopped", w.ID)
-	logger.Info(msg)
+	w.logger.Info("Stopping worker")
+	w.cancel()
+	w.wg.Wait()
+	w.logger.Info("Worker stopped")
 }
 
 // processLoop continuously polls for jobs and processes them
 func (w *Worker) processLoop() {
+	defer w.wg.Done()
+
 	for {
 		select {
-		case <-w.shutdown:
+		case <-w.ctx.Done():
 			return
 		default:
 			w.processSingleJob()
@@ -68,8 +81,9 @@ func (w *Worker) processLoop() {
 func (w *Worker) processSingleJob() {
 	j, err := w.queue.ConsumeJob()
 	if err != nil {
-		errMsg := fmt.Sprintf("Error consuming job: %v", err)
-		logger.Error(errMsg)
+		w.logger.Error("Error consuming job", map[string]interface{}{
+			"error": err.Error(),
+		})
 		return
 	}
 
@@ -83,98 +97,121 @@ func (w *Worker) processSingleJob() {
 
 // processJob handles the processing of a job
 func (w *Worker) processJob(j *job.Job) {
-	startMsg := fmt.Sprintf("Worker %s processing job %s (type: %s)", w.ID, j.ID, j.Type)
-	logger.Info(startMsg)
+	// Start metrics tracking
+	metrics.ActiveWorkers.Inc()
+	defer metrics.ActiveWorkers.Dec()
 
-	// Mark job as running
-	j.MarkRunning()
-	j.WorkerID = w.ID
-	err := w.queue.UpdateJobStatus(j)
-	if err != nil {
-		errMsg := fmt.Sprintf("Error updating job status: %v", err)
-		logger.Error(errMsg)
-	}
+	// Create process timer
+	timer := prometheus.NewTimer(metrics.JobProcessingTime.WithLabelValues(j.Type))
+	defer timer.ObserveDuration()
+
+	w.logger.WithJob(j.ID, "Processing job", map[string]interface{}{
+		"type":     j.Type,
+		"priority": string(j.Priority),
+		"worker":   w.ID,
+	})
 
 	// Find the processor for this job type
 	processor, exists := w.processors[j.Type]
 	if !exists {
-		errMsg := fmt.Sprintf("No processor registered for job type: %s", j.Type)
-		logger.Error(errMsg)
-		j.MarkFailed(errMsg)
-		w.handleFailedJob(j, fmt.Errorf(errMsg))
+		w.logger.JobError(j.ID, "No processor registered for job type", map[string]interface{}{
+			"type": j.Type,
+		})
+
+		// Move to dead letter queue
+		err := w.queue.MoveToDeadLetter(j)
+		if err != nil {
+			w.logger.JobError(j.ID, "Failed to move job to dead letter queue", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 		return
 	}
 
 	// Process the job
-	err = processor(j)
+	err := processor(w.ctx, j)
 	if err != nil {
-		errMsg := fmt.Sprintf("Job %s failed: %v", j.ID, err)
-		logger.Error(errMsg)
-		j.MarkFailed(err.Error())
-		w.handleFailedJob(j, err)
+		w.logger.JobError(j.ID, "Job processing failed", map[string]interface{}{
+			"error":    err.Error(),
+			"attempts": j.Attempts,
+		})
+
+		// Check if we should retry
+		if j.Attempts < 3 { // Default max attempts
+			// Move to retry queue
+			err = w.queue.RetryJob(j)
+			if err != nil {
+				w.logger.JobError(j.ID, "Failed to move job to retry queue", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+		} else {
+			// Move to dead letter queue
+			err = w.queue.MoveToDeadLetter(j)
+			if err != nil {
+				w.logger.JobError(j.ID, "Failed to move job to dead letter queue", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+		}
 		return
 	}
 
-	// Job succeeded
-	j.MarkCompleted()
-	err = w.queue.UpdateJobStatus(j)
+	// Job completed successfully
+	w.logger.WithJob(j.ID, "Job completed successfully")
+
+	// Update job status to completed
+	err = w.queue.UpdateJobStatus(j.ID, job.StatusCompleted)
 	if err != nil {
-		errMsg := fmt.Sprintf("Error updating job status: %v", err)
-		logger.Error(errMsg)
+		w.logger.JobError(j.ID, "Failed to update job status to completed", map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	completeMsg := fmt.Sprintf("Worker %s completed job %s", w.ID, j.ID)
-	logger.Info(completeMsg)
-}
-
-// handleFailedJob determines what to do with a failed job
-func (w *Worker) handleFailedJob(j *job.Job, err error) {
-	if j.ShouldRetry() {
-		retryMsg := fmt.Sprintf("Scheduling job %s for retry (%d/%d)", j.ID, j.Attempts, j.MaxAttempts)
-		logger.Info(retryMsg)
-
-		retryErr := w.queue.RetryJob(j)
-		if retryErr != nil {
-			errMsg := fmt.Sprintf("Error scheduling retry: %v", retryErr)
-			logger.Error(errMsg)
-		}
-	} else {
-		deadLetterMsg := fmt.Sprintf("Moving job %s to dead letter queue after %d failed attempts", j.ID, j.Attempts)
-		logger.Info(deadLetterMsg)
-
-		// Update status and move to dead letter queue
-		j.MarkDeadLetter()
-		dlqErr := w.queue.RetryJob(j)
-		if dlqErr != nil {
-			errMsg := fmt.Sprintf("Error moving to dead letter queue: %v", dlqErr)
-			logger.Error(errMsg)
-		}
-	}
+	metrics.JobsProcessed.WithLabelValues(j.Type, "completed").Inc()
 }
 
 // RegisterDefaultProcessors registers basic processors for common job types
 func (w *Worker) RegisterDefaultProcessors() {
 	// Email processor
-	w.RegisterProcessor("email", func(j *job.Job) error {
-		logger.Info(fmt.Sprintf("Processing email job: %s", j.Payload))
+	w.RegisterProcessor("email", func(ctx context.Context, j *job.Job) error {
+		log := logger.NewLogger("email-processor")
+		log.WithJob(j.ID, "Processing email job", map[string]interface{}{
+			"data": j.Data,
+		})
+
 		// Simulate email sending
 		time.Sleep(500 * time.Millisecond)
+
+		log.WithJob(j.ID, "Email job processed successfully")
 		return nil
 	})
 
 	// Notification processor
-	w.RegisterProcessor("notification", func(j *job.Job) error {
-		logger.Info(fmt.Sprintf("Processing notification job: %s", j.Payload))
-		// Simulate notification
+	w.RegisterProcessor("notification", func(ctx context.Context, j *job.Job) error {
+		log := logger.NewLogger("notification-processor")
+		log.WithJob(j.ID, "Processing notification job", map[string]interface{}{
+			"data": j.Data,
+		})
+
+		// Simulate notification sending
 		time.Sleep(200 * time.Millisecond)
+
+		log.WithJob(j.ID, "Notification job processed successfully")
 		return nil
 	})
 
-	// Generic processor for testing
-	w.RegisterProcessor("test", func(j *job.Job) error {
-		logger.Info(fmt.Sprintf("Processing test job: %s", j.Payload))
+	// Test processor
+	w.RegisterProcessor("test", func(ctx context.Context, j *job.Job) error {
+		log := logger.NewLogger("test-processor")
+		log.WithJob(j.ID, "Processing test job", map[string]interface{}{
+			"data": j.Data,
+		})
+
 		// Simulate work
 		time.Sleep(100 * time.Millisecond)
+
+		log.WithJob(j.ID, "Test job processed successfully")
 		return nil
 	})
 }

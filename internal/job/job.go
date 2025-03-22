@@ -3,174 +3,130 @@ package job
 
 import (
 	"encoding/json"
-	"fmt"
+	"math"
 	"time"
 )
 
-// Job statuses
+// Status represents the status of a job
+type Status string
+
 const (
-	StatusPending    = "pending"
-	StatusRunning    = "running"
-	StatusCompleted  = "completed"
-	StatusFailed     = "failed"
-	StatusRetrying   = "retrying"
-	StatusDeadLetter = "dead_letter"
-	StatusCancelled  = "cancelled"
+	StatusUnknown   Status = "unknown"
+	StatusPending   Status = "pending"
+	StatusRunning   Status = "running"
+	StatusCompleted Status = "completed"
+	StatusFailed    Status = "failed"
+	StatusRetrying  Status = "retrying"
+	StatusCancelled Status = "cancelled"
 )
 
-// Priority levels
-const (
-	PriorityLow      = 1
-	PriorityNormal   = 2
-	PriorityHigh     = 3
-	PriorityCritical = 4
-)
+// Priority represents the priority of a job
+type Priority string
 
-// DefaultMaxAttempts is the default number of retry attempts
-const DefaultMaxAttempts = 3
+const (
+	PriorityLow      Priority = "low"
+	PriorityNormal   Priority = "normal"
+	PriorityHigh     Priority = "high"
+	PriorityCritical Priority = "critical"
+)
 
 // Job represents a task to be processed
 type Job struct {
-	ID          string      `json:"id"`
-	Type        string      `json:"type"`
-	Payload     string      `json:"payload"`
-	Status      string      `json:"status"`
-	Priority    int         `json:"priority"`
-	CreatedAt   time.Time   `json:"created_at"`
-	StartedAt   time.Time   `json:"started_at,omitempty"`
-	CompletedAt time.Time   `json:"completed_at,omitempty"`
-	NextRetryAt time.Time   `json:"next_retry_at,omitempty"`
-	Attempts    int         `json:"attempts"`
-	MaxAttempts int         `json:"max_attempts"`
-	Error       string      `json:"error,omitempty"`
-	WorkerID    string      `json:"worker_id,omitempty"`
-	Tags        []string    `json:"tags,omitempty"`
-	Result      interface{} `json:"result,omitempty"`
-	Timeout     int         `json:"timeout,omitempty"` // Timeout in seconds
+	ID          string                 `json:"id"`
+	Type        string                 `json:"type"`
+	Data        map[string]interface{} `json:"data"`
+	Status      Status                 `json:"status"`
+	Priority    Priority               `json:"priority"`
+	Tags        []string               `json:"tags,omitempty"`
+	Attempts    int                    `json:"attempts"`
+	MaxRetries  int                    `json:"max_retries"`
+	CreatedAt   time.Time              `json:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+	StartedAt   time.Time              `json:"started_at,omitempty"`
+	FinishedAt  time.Time              `json:"finished_at,omitempty"`
+	LastAttempt time.Time              `json:"last_attempt,omitempty"`
+	Timeout     int                    `json:"timeout"`
+	TraceID     string                 `json:"trace_id,omitempty"`
+	Result      map[string]interface{} `json:"result,omitempty"`
+	Error       string                 `json:"error,omitempty"`
 }
 
-// NewJob creates a new job with default values
-func NewJob(jobType, payload string) *Job {
-	return &Job{
-		ID:          generateID(),
-		Type:        jobType,
-		Payload:     payload,
-		Status:      StatusPending,
-		Priority:    PriorityNormal,
-		CreatedAt:   time.Now(),
-		Attempts:    0,
-		MaxAttempts: DefaultMaxAttempts,
-	}
+func (j *Job) SetPriority(low Priority) {
+	panic("unimplemented")
 }
 
-// SetPriority sets the job priority
-func (j *Job) SetPriority(priority int) *Job {
-	if priority < PriorityLow || priority > PriorityCritical {
-		j.Priority = PriorityNormal
-	} else {
-		j.Priority = priority
-	}
-	return j
-}
-
-// SetMaxAttempts sets the maximum number of retry attempts
-func (j *Job) SetMaxAttempts(attempts int) *Job {
-	if attempts < 1 {
-		j.MaxAttempts = 1
-	} else {
-		j.MaxAttempts = attempts
-	}
-	return j
-}
-
-// SetTimeout sets the job timeout in seconds
-func (j *Job) SetTimeout(seconds int) *Job {
-	if seconds < 1 {
-		j.Timeout = 60 // Default 1 minute
-	} else {
-		j.Timeout = seconds
-	}
-	return j
-}
-
-// AddTag adds a tag to the job
-func (j *Job) AddTag(tag string) *Job {
-	j.Tags = append(j.Tags, tag)
-	return j
+// String returns a string representation of the job
+func (j *Job) String() string {
+	data, _ := json.Marshal(j)
+	return string(data)
 }
 
 // MarkRunning updates the job status to running
 func (j *Job) MarkRunning() {
 	j.Status = StatusRunning
 	j.StartedAt = time.Now()
+	j.UpdatedAt = time.Now()
 }
 
 // MarkCompleted updates the job status to completed
-func (j *Job) MarkCompleted() {
+func (j *Job) MarkCompleted(result map[string]interface{}) {
 	j.Status = StatusCompleted
-	j.CompletedAt = time.Now()
+	j.FinishedAt = time.Now()
+	j.UpdatedAt = time.Now()
+	j.Result = result
 }
 
-// MarkFailed updates the job status to failed and increments attempts
-func (j *Job) MarkFailed(errMsg string) {
+// MarkFailed updates the job status to failed
+func (j *Job) MarkFailed(err error) {
 	j.Status = StatusFailed
-	j.Error = errMsg
-	j.Attempts++
+	j.FinishedAt = time.Now()
+	j.UpdatedAt = time.Now()
+	if err != nil {
+		j.Error = err.Error()
+	}
 }
 
-// MarkRetrying updates the job status for retry
-func (j *Job) MarkRetrying() {
+// MarkRetrying updates the job status to retrying
+func (j *Job) MarkRetrying(err error) {
 	j.Status = StatusRetrying
-	j.NextRetryAt = time.Now().Add(j.CalculateBackoff())
+	j.UpdatedAt = time.Now()
+	j.Attempts++
+	j.LastAttempt = time.Now()
+	if err != nil {
+		j.Error = err.Error()
+	}
 }
 
-// MarkDeadLetter updates the job status to dead letter
-func (j *Job) MarkDeadLetter() {
-	j.Status = StatusDeadLetter
+// MarkCancelled updates the job status to cancelled
+func (j *Job) MarkCancelled() {
+	j.Status = StatusCancelled
+	j.FinishedAt = time.Now()
+	j.UpdatedAt = time.Now()
 }
 
-// ShouldRetry determines if a job should be retried based on its current state
-func (j *Job) ShouldRetry() bool {
-	return j.Status == StatusFailed && j.Attempts < j.MaxAttempts
+// GetBackoffSeconds calculates the backoff duration in seconds
+func (j *Job) GetBackoffSeconds() int {
+	// Exponential backoff: 2^attempts seconds
+	backoff := int(math.Pow(2, float64(j.Attempts)))
+
+	// Cap at 5 minutes
+	if backoff > 300 {
+		backoff = 300
+	}
+
+	return backoff
 }
 
-// CalculateBackoff calculates the backoff duration for retries
-func (j *Job) CalculateBackoff() time.Duration {
-	// Exponential backoff: 2^attempts seconds (1, 2, 4, 8, 16...)
-	return time.Second * time.Duration(1<<j.Attempts)
-}
-
-// IsExpired checks if a job has exceeded its timeout
+// IsExpired checks if the job has expired based on timeout
 func (j *Job) IsExpired() bool {
-	if j.Timeout == 0 || j.StartedAt.IsZero() {
+	if j.Status != StatusRunning || j.StartedAt.IsZero() {
 		return false
 	}
 
-	deadline := j.StartedAt.Add(time.Duration(j.Timeout) * time.Second)
-	return time.Now().After(deadline)
-}
-
-// ToJSON serializes the job to JSON
-func (j *Job) ToJSON() (string, error) {
-	bytes, err := json.Marshal(j)
-	if err != nil {
-		return "", err
+	if j.Timeout <= 0 {
+		return false
 	}
-	return string(bytes), nil
-}
 
-// FromJSON deserializes a job from JSON
-func FromJSON(jsonStr string) (*Job, error) {
-	var job Job
-	err := json.Unmarshal([]byte(jsonStr), &job)
-	if err != nil {
-		return nil, err
-	}
-	return &job, nil
-}
-
-// generateID creates a unique ID for a job
-// In production, consider using UUID or similar
-func generateID() string {
-	return fmt.Sprintf("job_%d", time.Now().UnixNano())
+	timeout := time.Duration(j.Timeout) * time.Second
+	return time.Since(j.StartedAt) > timeout
 }

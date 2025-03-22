@@ -2,55 +2,81 @@ version: '3.8'
 
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:alpine
     ports:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
 
   api:
     build:
       context: .
       dockerfile: Dockerfile
-      target: api
+      target: api     # 👈 tells it to use the final stage named "api"
     ports:
       - "8080:8080"
+      - "9090:9090"
     environment:
       - REDIS_ADDR=redis:6379
-      - API_PORT=8080
-      - LOG_LEVEL=info
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - ENVIRONMENT=development
     depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - redis
+      - jaeger
 
   worker:
     build:
       context: .
       dockerfile: Dockerfile
-      target: worker
-    deploy:
-      replicas: 2
+      target: worker  # 👈 tells it to use the final stage named "worker"
+    ports:
+      - "9091:9091"
     environment:
       - REDIS_ADDR=redis:6379
-      - LOG_LEVEL=info
-      - NUM_WORKERS=2
+      - NUM_WORKERS=4
       - MAX_ATTEMPTS=3
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - ENVIRONMENT=development
     depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+      - redis
+      - jaeger
+
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9092:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
 
 volumes:
   redis-data:
+  prometheus-data:
+  grafana-data:

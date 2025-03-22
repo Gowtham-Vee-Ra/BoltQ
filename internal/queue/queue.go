@@ -2,7 +2,7 @@
 package queue
 
 // Queue defines the interface for job queues
-type Queue interface {
+type JobQueue interface {
 	// Basic queue operations
 	Publish(task string) error
 	Consume() (string, error)

@@ -3,11 +3,9 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -15,85 +13,89 @@ import (
 	"BoltQ/internal/queue"
 	"BoltQ/pkg/config"
 	"BoltQ/pkg/logger"
-
-	"github.com/gorilla/mux"
-	"github.com/joho/godotenv"
+	"BoltQ/pkg/metrics"
+	"BoltQ/pkg/tracing"
 )
 
 func main() {
-	// Load environment variables
-	godotenv.Load()
+	log := logger.NewLogger("api-service")
+	log.Info("Starting Job API Service")
 
-	// Configure logging
-	logger.Setup(os.Getenv("LOG_LEVEL"))
-	msg := "Starting Job API Service..."
-	logger.Info(msg)
+	// Create context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Configure API port
-	port := config.GetEnv("API_PORT", "8080")
-
-	// Configure Redis
-	redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
-	redisPass := config.GetEnv("REDIS_PASSWORD", "")
-	redisDB, _ := strconv.Atoi(config.GetEnv("REDIS_DB", "0"))
-
-	// Set up Redis queue - using the simple constructor which matches our implementation
-	redisQueue := queue.NewRedisQueue(redisAddr, redisPass, redisDB)
-	connectedMsg := fmt.Sprintf("Connected to Redis at %s", redisAddr)
-	logger.Info(connectedMsg)
-
-	// Create API handler
-	apiHandler := api.NewAPI(redisQueue)
-
-	// Set up router
-	router := mux.NewRouter()
-	apiHandler.SetupRoutes(router)
-
-	// Set up HTTP server
-	server := &http.Server{
-		Addr:         ":" + port,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	// Initialize tracing
+	shutdownTracer, err := tracing.InitTracer(ctx, "boltq-api")
+	if err != nil {
+		log.Error("Failed to initialize tracer", map[string]interface{}{
+			"error": err.Error(),
+		})
+	} else {
+		defer shutdownTracer()
 	}
 
-	// Run server in a goroutine so it doesn't block shutdown handling
+	// Get configuration
+	redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
+	apiPort := config.GetEnv("API_PORT", "8080")
+	metricsPort := config.GetEnv("METRICS_PORT", "9090")
+
+	// Setup Redis queue
+	redisQueue := queue.NewRedisQueue(ctx, redisAddr)
+
+	// Setup API handler
+	handler := api.NewHandler(redisQueue)
+
+	// Setup routes
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Job API Running!"))
+	})
+	mux.HandleFunc("/jobs/submit", handler.SubmitJobHandler)
+	mux.HandleFunc("/jobs/status", handler.GetJobStatusHandler)
+	mux.HandleFunc("/queue/stats", handler.GetQueueStatsHandler)
+
+	// Setup metrics server
+	metrics.SetupMetricsServer(":" + metricsPort)
+	log.Info("Metrics server started", map[string]interface{}{
+		"port": metricsPort,
+	})
+
+	// Start HTTP server
+	server := &http.Server{
+		Addr:    ":" + apiPort,
+		Handler: mux,
+	}
+
+	// Start server in a goroutine
 	go func() {
-		listeningMsg := fmt.Sprintf("API server listening on port %s", port)
-		logger.Info(listeningMsg)
+		log.Info("API server listening", map[string]interface{}{
+			"port": apiPort,
+		})
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errorMsg := fmt.Sprintf("Server error: %v", err)
-			logger.Error(errorMsg)
-			os.Exit(1)
+			log.Error("HTTP server error", map[string]interface{}{
+				"error": err.Error(),
+			})
+			cancel()
 		}
 	}()
 
-	// Set up graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	// Wait for interrupt signal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
 
-	// Block until we receive a shutdown signal
-	<-quit
-	msgShutdown := "Shutting down API server..."
-	logger.Info(msgShutdown)
+	log.Info("Shutting down API service")
 
-	// Create a deadline for shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Shutdown HTTP server
+	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer shutdownCancel()
 
-	// Attempt graceful shutdown
-	if err := server.Shutdown(ctx); err != nil {
-		errorMsg := fmt.Sprintf("Server forced to shutdown: %v", err)
-		logger.Error(errorMsg)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Error("HTTP server shutdown error", map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	// Close Redis connection
-	if err := redisQueue.Close(); err != nil {
-		errorMsg := fmt.Sprintf("Error closing Redis connection: %v", err)
-		logger.Error(errorMsg)
-	}
-
-	msgComplete := "API server shutdown complete"
-	logger.Info(msgComplete)
+	log.Info("API service stopped")
 }
