@@ -279,5 +279,5 @@ go run cmd/test/main.go
 
 ## Acknowledgments
 
-[Go Redis](https://github.com/redis/go-redis) library
-[Gorilla Mux](https://github.com/gorilla/mux) for HTTP routing
+- [Go Redis](https://github.com/redis/go-redis) library
+- [Gorilla Mux](https://github.com/gorilla/mux) for HTTP routing
