@@ -1,47 +1,84 @@
-.PHONY: build run-api run-worker clean all
+.PHONY: build run-api run-worker docker-build docker-run test clean
 
-# Set up module path
-MODULE_PATH=github.com/yourusername/BoltQ
+# Default Go parameters
+GO=go
+GOFLAGS=-v
+API_BINARY=bin/boltq-api
+WORKER_BINARY=bin/boltq-worker
 
-# Build binaries
+# Build both API and worker binaries
 build:
-	@echo "Building API and Worker services..."
-	go build -o bin/api $(MODULE_PATH)/cmd/api
-	go build -o bin/worker $(MODULE_PATH)/cmd/worker
+	mkdir -p bin
+	$(GO) build $(GOFLAGS) -o $(API_BINARY) ./cmd/api
+	$(GO) build $(GOFLAGS) -o $(WORKER_BINARY) ./cmd/worker
 	@echo "Build complete"
 
-# Run API service
+# Run the API service
 run-api:
-	@echo "Starting API service..."
-	go run cmd/api/main.go
+	$(GO) run $(GOFLAGS) ./cmd/api
 
-# Run Worker service
+# Run the worker service
 run-worker:
-	@echo "Starting Worker service..."
-	go run cmd/worker/main.go
+	$(GO) run $(GOFLAGS) ./cmd/worker
 
-# Clean binaries
-clean:
-	@echo "Cleaning binaries..."
-	rm -rf bin/
+# Build Docker images
+docker-build:
+	docker-compose build
 
-# Build and run all services
-all: build
-	@echo "Running all services..."
-	./bin/api & ./bin/worker
-
-# Initialize project with proper module name
-init:
-	@echo "Initializing module..."
-	go mod init $(MODULE_PATH)
-	go mod tidy
+# Run with Docker Compose
+docker-run:
+	docker-compose up
 
 # Run tests
 test:
-	@echo "Running tests..."
-	go test ./...
+	$(GO) test ./...
 
-# Install dependencies
-deps:
-	@echo "Installing dependencies..."
-	go get github.com/go-redis/redis/v8
+# Run tests with coverage
+test-coverage:
+	$(GO) test -coverprofile=coverage.out ./...
+	$(GO) tool cover -html=coverage.out
+
+# Clean build artifacts
+clean:
+	rm -rf bin
+	rm -f coverage.out
+
+# Start Redis locally (requires Redis to be installed)
+redis-start:
+	redis-server --daemonize yes
+	@echo "Redis started"
+
+# Stop local Redis
+redis-stop:
+	redis-cli shutdown
+	@echo "Redis stopped"
+
+# Scale up workers with Docker Compose
+scale-workers:
+	docker-compose up -d --scale worker=4
+
+# Check health of services
+health-check:
+	@echo "Checking API health..."
+	@curl -s http://localhost:8080/health | jq || echo "API not running"
+	
+	@echo "Checking Redis connection..."
+	@redis-cli ping || echo "Redis not running"
+
+# Initialize dev environment
+init-dev:
+	$(GO) mod tidy
+	cp .env.example .env
+	@echo "Development environment initialized"
+
+# Generate API documentation
+gen-docs:
+	@echo "Generating API documentation..."
+	# Add documentation generation command here
+	@echo "Documentation generated"
+
+# Load test the API
+load-test:
+	@echo "Running load test..."
+	# Add load testing command here (e.g., with hey or vegeta)
+	@echo "Load test complete"

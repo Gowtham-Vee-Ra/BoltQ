@@ -1,3 +1,4 @@
+// internal/worker/worker.go
 package worker
 
 import (
@@ -38,7 +39,7 @@ func (w *Worker) RegisterProcessor(jobType string, processor JobProcessor) {
 // Start begins the worker processing loop
 func (w *Worker) Start() {
 	msg := fmt.Sprintf("Worker %s started", w.ID)
-	logger.Info(&msg)
+	logger.Info(msg)
 
 	go w.processLoop()
 }
@@ -47,7 +48,7 @@ func (w *Worker) Start() {
 func (w *Worker) Stop() {
 	w.shutdown <- true
 	msg := fmt.Sprintf("Worker %s stopped", w.ID)
-	logger.Info(&msg)
+	logger.Info(msg)
 }
 
 // processLoop continuously polls for jobs and processes them
@@ -68,7 +69,7 @@ func (w *Worker) processSingleJob() {
 	j, err := w.queue.ConsumeJob()
 	if err != nil {
 		errMsg := fmt.Sprintf("Error consuming job: %v", err)
-		logger.Error(&errMsg)
+		logger.Error(errMsg)
 		return
 	}
 
@@ -83,21 +84,22 @@ func (w *Worker) processSingleJob() {
 // processJob handles the processing of a job
 func (w *Worker) processJob(j *job.Job) {
 	startMsg := fmt.Sprintf("Worker %s processing job %s (type: %s)", w.ID, j.ID, j.Type)
-	logger.Info(&startMsg)
+	logger.Info(startMsg)
 
 	// Mark job as running
 	j.MarkRunning()
+	j.WorkerID = w.ID
 	err := w.queue.UpdateJobStatus(j)
 	if err != nil {
 		errMsg := fmt.Sprintf("Error updating job status: %v", err)
-		logger.Error(&errMsg)
+		logger.Error(errMsg)
 	}
 
 	// Find the processor for this job type
 	processor, exists := w.processors[j.Type]
 	if !exists {
 		errMsg := fmt.Sprintf("No processor registered for job type: %s", j.Type)
-		logger.Error(&errMsg)
+		logger.Error(errMsg)
 		j.MarkFailed(errMsg)
 		w.handleFailedJob(j, fmt.Errorf(errMsg))
 		return
@@ -107,7 +109,7 @@ func (w *Worker) processJob(j *job.Job) {
 	err = processor(j)
 	if err != nil {
 		errMsg := fmt.Sprintf("Job %s failed: %v", j.ID, err)
-		logger.Error(&errMsg)
+		logger.Error(errMsg)
 		j.MarkFailed(err.Error())
 		w.handleFailedJob(j, err)
 		return
@@ -118,34 +120,61 @@ func (w *Worker) processJob(j *job.Job) {
 	err = w.queue.UpdateJobStatus(j)
 	if err != nil {
 		errMsg := fmt.Sprintf("Error updating job status: %v", err)
-		logger.Error(&errMsg)
+		logger.Error(errMsg)
 	}
 
 	completeMsg := fmt.Sprintf("Worker %s completed job %s", w.ID, j.ID)
-	logger.Info(&completeMsg)
+	logger.Info(completeMsg)
 }
 
 // handleFailedJob determines what to do with a failed job
 func (w *Worker) handleFailedJob(j *job.Job, err error) {
 	if j.ShouldRetry() {
-		retryMsg := fmt.Sprintf("Scheduling job %s for retry (%d/%d)", j.ID, j.Attempts+1, j.MaxAttempts)
-		logger.Info(&retryMsg)
+		retryMsg := fmt.Sprintf("Scheduling job %s for retry (%d/%d)", j.ID, j.Attempts, j.MaxAttempts)
+		logger.Info(retryMsg)
 
 		retryErr := w.queue.RetryJob(j)
 		if retryErr != nil {
 			errMsg := fmt.Sprintf("Error scheduling retry: %v", retryErr)
-			logger.Error(&errMsg)
+			logger.Error(errMsg)
 		}
 	} else {
 		deadLetterMsg := fmt.Sprintf("Moving job %s to dead letter queue after %d failed attempts", j.ID, j.Attempts)
-		logger.Info(&deadLetterMsg)
+		logger.Info(deadLetterMsg)
 
 		// Update status and move to dead letter queue
-		j.Status = job.StatusDeadLetter
+		j.MarkDeadLetter()
 		dlqErr := w.queue.RetryJob(j)
 		if dlqErr != nil {
 			errMsg := fmt.Sprintf("Error moving to dead letter queue: %v", dlqErr)
-			logger.Error(&errMsg)
+			logger.Error(errMsg)
 		}
 	}
+}
+
+// RegisterDefaultProcessors registers basic processors for common job types
+func (w *Worker) RegisterDefaultProcessors() {
+	// Email processor
+	w.RegisterProcessor("email", func(j *job.Job) error {
+		logger.Info(fmt.Sprintf("Processing email job: %s", j.Payload))
+		// Simulate email sending
+		time.Sleep(500 * time.Millisecond)
+		return nil
+	})
+
+	// Notification processor
+	w.RegisterProcessor("notification", func(j *job.Job) error {
+		logger.Info(fmt.Sprintf("Processing notification job: %s", j.Payload))
+		// Simulate notification
+		time.Sleep(200 * time.Millisecond)
+		return nil
+	})
+
+	// Generic processor for testing
+	w.RegisterProcessor("test", func(j *job.Job) error {
+		logger.Info(fmt.Sprintf("Processing test job: %s", j.Payload))
+		// Simulate work
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
 }

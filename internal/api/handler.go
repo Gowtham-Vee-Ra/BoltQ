@@ -1,3 +1,4 @@
+// internal/api/handler.go
 package api
 
 import (
@@ -5,147 +6,327 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"time"
 
 	"BoltQ/internal/job"
 	"BoltQ/internal/queue"
 	"BoltQ/pkg/logger"
+
+	"github.com/gorilla/mux"
 )
 
-// JobHandler handles job-related API endpoints
-type JobHandler struct {
-	queue *queue.RedisQueue
+// API represents the API service
+type API struct {
+	queue queue.Queue
 }
 
-// NewJobHandler creates a new job handler
-func NewJobHandler(q *queue.RedisQueue) *JobHandler {
-	return &JobHandler{queue: q}
+// NewAPI creates a new API instance
+func NewAPI(q queue.Queue) *API {
+	return &API{queue: q}
+}
+
+// JobSubmissionRequest represents a request to submit a new job
+type JobSubmissionRequest struct {
+	Type        string   `json:"type"`
+	Payload     string   `json:"payload"`
+	Priority    int      `json:"priority,omitempty"`
+	MaxAttempts int      `json:"max_attempts,omitempty"`
+	Timeout     int      `json:"timeout,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
 }
 
 // SubmitJobHandler handles job submission requests
-func (h *JobHandler) SubmitJobHandler(w http.ResponseWriter, r *http.Request) {
+func (api *API) SubmitJobHandler(w http.ResponseWriter, r *http.Request) {
 	// Only accept POST requests
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Read the request body
+	// Read request body
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 
-	// Parse the request
-	var request struct {
-		Type        string                 `json:"type"`
-		Payload     map[string]interface{} `json:"payload"`
-		MaxAttempts int                    `json:"max_attempts,omitempty"`
-	}
-
-	err = json.Unmarshal(body, &request)
-	if err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	// Parse request body
+	var req JobSubmissionRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
 		return
 	}
 
 	// Validate request
-	if request.Type == "" {
-		http.Error(w, "Job type is required", http.StatusBadRequest)
+	if req.Type == "" || req.Payload == "" {
+		http.Error(w, "Job type and payload are required", http.StatusBadRequest)
 		return
 	}
 
 	// Create a new job
-	j := job.NewJob(request.Type, request.Payload)
+	newJob := job.NewJob(req.Type, req.Payload)
 
-	// Set max attempts if provided
-	if request.MaxAttempts > 0 {
-		j.MaxAttempts = request.MaxAttempts
+	// Set optional fields if provided
+	if req.Priority > 0 {
+		newJob.SetPriority(req.Priority)
+	}
+	if req.MaxAttempts > 0 {
+		newJob.SetMaxAttempts(req.MaxAttempts)
+	}
+	if req.Timeout > 0 {
+		newJob.SetTimeout(req.Timeout)
+	}
+	for _, tag := range req.Tags {
+		newJob.AddTag(tag)
 	}
 
-	// Add the job to the queue
-	err = h.queue.PublishJob(j)
+	// Convert job to JSON
+	jobJSON, err := newJob.ToJSON()
 	if err != nil {
-		errMsg := fmt.Sprintf("Error publishing job: %v", err)
-		logger.Error(&errMsg)
-		http.Error(w, "Error processing job", http.StatusInternalServerError)
+		http.Error(w, "Failed to serialize job", http.StatusInternalServerError)
 		return
 	}
 
-	// Return the job ID
-	response := map[string]string{
-		"job_id": j.ID,
-		"status": string(j.Status),
-	}
-
-	responseJSON, err := json.Marshal(response)
+	// Save job status
+	err = api.queue.SaveJobStatus(newJob.ID, jobJSON)
 	if err != nil {
-		http.Error(w, "Error generating response", http.StatusInternalServerError)
+		http.Error(w, "Failed to save job status", http.StatusInternalServerError)
 		return
 	}
 
+	// Publish job to queue
+	err = api.queue.Publish(jobJSON)
+	if err != nil {
+		http.Error(w, "Failed to queue job", http.StatusInternalServerError)
+		return
+	}
+
+	// Log job submission
+	msg := fmt.Sprintf("Job submitted: %s, Type: %s, Priority: %d", newJob.ID, newJob.Type, newJob.Priority)
+	logger.Info(msg)
+
+	// Return job ID and status
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	w.Write(responseJSON)
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{
+		"job_id": newJob.ID,
+		"status": newJob.Status,
+	})
 }
 
-// GetJobStatusHandler handles job status requests
-func (h *JobHandler) GetJobStatusHandler(w http.ResponseWriter, r *http.Request) {
+// GetJobStatusHandler handles requests to check job status
+func (api *API) GetJobStatusHandler(w http.ResponseWriter, r *http.Request) {
 	// Only accept GET requests
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Extract job ID from query parameters
-	jobID := r.URL.Query().Get("id")
+	// Get job ID from URL params
+	vars := mux.Vars(r)
+	jobID := vars["id"]
 	if jobID == "" {
 		http.Error(w, "Job ID is required", http.StatusBadRequest)
 		return
 	}
 
-	// Get job status
-	j, err := h.queue.GetJobStatus(jobID)
+	// Get job status from Redis
+	jobJSON, err := api.queue.GetJobStatus(jobID)
 	if err != nil {
 		http.Error(w, "Job not found", http.StatusNotFound)
 		return
 	}
 
-	// Return the job status
-	responseJSON, err := json.Marshal(j)
-	if err != nil {
-		http.Error(w, "Error generating response", http.StatusInternalServerError)
+	// Parse job JSON
+	var job job.Job
+	if err := json.Unmarshal([]byte(jobJSON), &job); err != nil {
+		http.Error(w, "Failed to parse job data", http.StatusInternalServerError)
 		return
 	}
 
+	// Return job status
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(responseJSON)
+	json.NewEncoder(w).Encode(job)
 }
 
-// GetQueueStatsHandler returns statistics about the job queues
-func (h *JobHandler) GetQueueStatsHandler(w http.ResponseWriter, r *http.Request) {
+// GetQueueStatsHandler handles requests for queue statistics
+func (api *API) GetQueueStatsHandler(w http.ResponseWriter, r *http.Request) {
 	// Only accept GET requests
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Get queue statistics
-	counts, err := h.queue.CountJobs()
+	// Get queue stats
+	stats, err := api.queue.GetQueueStats()
 	if err != nil {
-		http.Error(w, "Error fetching queue stats", http.StatusInternalServerError)
+		http.Error(w, "Failed to retrieve queue statistics", http.StatusInternalServerError)
 		return
 	}
 
-	// Return the queue statistics
-	responseJSON, err := json.Marshal(counts)
-	if err != nil {
-		http.Error(w, "Error generating response", http.StatusInternalServerError)
+	// Return stats
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// RetryJobHandler handles requests to retry a dead letter job
+func (api *API) RetryJobHandler(w http.ResponseWriter, r *http.Request) {
+	// Only accept POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// Get job ID from URL params
+	vars := mux.Vars(r)
+	jobID := vars["id"]
+	if jobID == "" {
+		http.Error(w, "Job ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get job status from Redis
+	jobJSON, err := api.queue.GetJobStatus(jobID)
+	if err != nil {
+		http.Error(w, "Job not found", http.StatusNotFound)
+		return
+	}
+
+	// Parse job JSON
+	var j job.Job
+	if err := json.Unmarshal([]byte(jobJSON), &j); err != nil {
+		http.Error(w, "Failed to parse job data", http.StatusInternalServerError)
+		return
+	}
+
+	// Check if job is in dead letter queue
+	if j.Status != job.StatusDeadLetter {
+		http.Error(w, "Only jobs in dead letter queue can be retried", http.StatusBadRequest)
+		return
+	}
+
+	// Reset job for retry
+	j.Status = job.StatusRetrying
+	j.Attempts = 0
+	j.Error = ""
+	j.NextRetryAt = time.Now()
+
+	// Convert job back to JSON
+	updatedJobJSON, err := json.Marshal(j)
+	if err != nil {
+		http.Error(w, "Failed to serialize job", http.StatusInternalServerError)
+		return
+	}
+
+	// Update job status
+	err = api.queue.SaveJobStatus(j.ID, string(updatedJobJSON))
+	if err != nil {
+		http.Error(w, "Failed to update job status", http.StatusInternalServerError)
+		return
+	}
+
+	// Publish job to retry queue
+	err = api.queue.PublishToRetry(string(updatedJobJSON))
+	if err != nil {
+		http.Error(w, "Failed to queue job for retry", http.StatusInternalServerError)
+		return
+	}
+
+	// Log job retry
+	msg := fmt.Sprintf("Job queued for retry: %s", j.ID)
+	logger.Info(msg)
+
+	// Return success
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(responseJSON)
+	json.NewEncoder(w).Encode(map[string]string{
+		"job_id": j.ID,
+		"status": j.Status,
+	})
+}
+
+// CancelJobHandler handles requests to cancel a pending job
+func (api *API) CancelJobHandler(w http.ResponseWriter, r *http.Request) {
+	// Only accept POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get job ID from URL params
+	vars := mux.Vars(r)
+	jobID := vars["id"]
+	if jobID == "" {
+		http.Error(w, "Job ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get job status from Redis
+	jobJSON, err := api.queue.GetJobStatus(jobID)
+	if err != nil {
+		http.Error(w, "Job not found", http.StatusNotFound)
+		return
+	}
+
+	// Parse job JSON
+	var j job.Job
+	if err := json.Unmarshal([]byte(jobJSON), &j); err != nil {
+		http.Error(w, "Failed to parse job data", http.StatusInternalServerError)
+		return
+	}
+
+	// Check if job can be cancelled (pending or retrying)
+	if j.Status != job.StatusPending && j.Status != job.StatusRetrying {
+		http.Error(w, "Only pending or retrying jobs can be cancelled", http.StatusBadRequest)
+		return
+	}
+
+	// Update job status to cancelled
+	j.Status = job.StatusCancelled
+	j.CompletedAt = time.Now()
+
+	// Convert job back to JSON
+	updatedJobJSON, err := json.Marshal(j)
+	if err != nil {
+		http.Error(w, "Failed to serialize job", http.StatusInternalServerError)
+		return
+	}
+
+	// Update job status
+	err = api.queue.SaveJobStatus(j.ID, string(updatedJobJSON))
+	if err != nil {
+		http.Error(w, "Failed to update job status", http.StatusInternalServerError)
+		return
+	}
+
+	// Log job cancellation
+	msg := fmt.Sprintf("Job cancelled: %s", j.ID)
+	logger.Info(msg)
+
+	// Return success
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"job_id": j.ID,
+		"status": j.Status,
+	})
+}
+
+// HealthCheckHandler handles health check requests
+func (api *API) HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "ok",
+		"time":   time.Now().Format(time.RFC3339),
+	})
+}
+
+// SetupRoutes configures the API routes
+func (api *API) SetupRoutes(router *mux.Router) {
+	router.HandleFunc("/api/jobs", api.SubmitJobHandler).Methods("POST")
+	router.HandleFunc("/api/jobs/{id}", api.GetJobStatusHandler).Methods("GET")
+	router.HandleFunc("/api/jobs/{id}/retry", api.RetryJobHandler).Methods("POST")
+	router.HandleFunc("/api/jobs/{id}/cancel", api.CancelJobHandler).Methods("POST")
+	router.HandleFunc("/api/stats", api.GetQueueStatsHandler).Methods("GET")
+	router.HandleFunc("/health", api.HealthCheckHandler).Methods("GET")
 }
