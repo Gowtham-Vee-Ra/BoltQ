@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -28,9 +29,13 @@ func main() {
 	log := logger.NewLogger("worker")
 	log.Info("Starting BoltQ Worker Service...")
 
+	if err := godotenv.Load(); err != nil {
+		log.Error("No .env file found or couldn't load it")
+	}
+
 	// Load configuration
 	numWorkersStr := config.GetEnv("NUM_WORKERS", "4")
-	metricsPort := config.GetEnv("METRICS_PORT", "9091")
+	metricsPort := config.GetEnv("METRICS_PORT", "9094")
 	redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
 
 	// Parse number of workers

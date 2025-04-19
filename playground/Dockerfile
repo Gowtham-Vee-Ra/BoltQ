@@ -1,21 +1,10 @@
-FROM node:20-alpine
-
+# Build stage
+FROM node:20-alpine AS build
 WORKDIR /app
-
-# Install dependencies
-COPY package.json package-lock.json* ./
-RUN npm ci
-
-# Copy project files
 COPY . .
+RUN npm install && npm run build
 
-# Set environment variables
-ENV VITE_API_URL=http://localhost:8080
-ENV VITE_GRAFANA_URL=http://localhost:3000
-ENV VITE_PROMETHEUS_URL=http://localhost:9092
-
-# Expose port
-EXPOSE 5173
-
-# Start development server with host set for Docker
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+# Serve using nginx
+FROM nginx:1.25-alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf

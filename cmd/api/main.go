@@ -19,7 +19,9 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rs/cors" // 🆕 Added CORS package
 )
 
 func main() {
@@ -27,9 +29,14 @@ func main() {
 	log := logger.NewLogger("api")
 	log.Info("Starting BoltQ API Service...")
 
+	// Load .env variables
+	if err := godotenv.Load(); err != nil {
+		log.Error("No .env file found or couldn't load it")
+	}
+
 	// Load configuration
 	apiPort := config.GetEnv("API_PORT", "8080")
-	metricsPort := config.GetEnv("METRICS_PORT", "9090")
+	metricsPort := config.GetEnv("METRICS_PORT", "9093")
 	redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
 
 	// Initialize Redis client
@@ -70,10 +77,18 @@ func main() {
 	// Register WebSocket route
 	router.HandleFunc("/ws/jobs", websocketManager.HandleJobUpdatesWebSocket)
 
-	// API server with graceful shutdown
+	// 🆕 CORS middleware wrapping the router
+	corsHandler := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:5173"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"*"},
+		AllowCredentials: true,
+	}).Handler(router)
+
+	// API server with CORS-enabled handler
 	apiServer := &http.Server{
 		Addr:         ":" + apiPort,
-		Handler:      router,
+		Handler:      corsHandler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -88,7 +103,7 @@ func main() {
 		Handler: metricsRouter,
 	}
 
-	// Run API server in goroutine
+	// Start API server
 	go func() {
 		log.Info(fmt.Sprintf("API server listening on port %s", apiPort))
 		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -97,7 +112,7 @@ func main() {
 		}
 	}()
 
-	// Run metrics server in goroutine
+	// Start metrics server
 	go func() {
 		log.Info(fmt.Sprintf("Metrics server listening on port %s", metricsPort))
 		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -105,28 +120,24 @@ func main() {
 		}
 	}()
 
-	// Wait for interrupt signal to gracefully shut down the servers
+	// Graceful shutdown handling
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	<-quit
 	log.Info("Shutting down servers...")
 
-	// Create shutdown contexts with timeout
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Shutdown API server
 	if err := apiServer.Shutdown(shutdownCtx); err != nil {
 		log.Error(fmt.Sprintf("API server shutdown error: %v", err))
 	}
 
-	// Shutdown metrics server
 	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
 		log.Error(fmt.Sprintf("Metrics server shutdown error: %v", err))
 	}
 
-	// Stop WebSocket manager
 	websocketManager.Stop()
 
 	log.Info("Servers stopped")
