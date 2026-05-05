@@ -7,6 +7,7 @@ import JobDetail from './components/JobDetail';
 import JobForm from './components/JobForm';
 import WorkflowList from './components/WorkflowList';
 import WorkflowDetail from './components/WorkflowDetail';
+import WorkflowForm from './components/WorkflowForm';
 import Dashboard from './components/Dashboard';
 
 const App = () => {
@@ -21,6 +22,7 @@ const App = () => {
         </Route>
         <Route path="workflows">
           <Route index element={<WorkflowList />} />
+          <Route path="new" element={<WorkflowForm />} />
           <Route path=":workflowId" element={<WorkflowDetail />} />
         </Route>
         <Route path="dashboard" element={<Dashboard />} />

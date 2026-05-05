@@ -1,9 +1,9 @@
-// internal/job/workflow_manager.go
 package job
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -13,17 +13,18 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
+var ErrWorkflowNotFound = errors.New("workflow not found")
+
 const (
-	// Redis keys for workflow storage
 	workflowKeyPrefix  = "workflow:"
 	workflowQueueKey   = "workflow_queue"
 	workflowStatusKey  = "workflow_status"
 	workflowStepKey    = "workflow_step:"
 	workflowResultsKey = "workflow_results:"
+	workflowIndexKey   = "workflow_index"
 	workflowTTL        = 72 * time.Hour
 )
 
-// WorkflowManager handles workflow operations and persistence
 type WorkflowManager struct {
 	redisClient *redis.Client
 	logger      *logger.Logger
@@ -31,7 +32,6 @@ type WorkflowManager struct {
 	mu          sync.Mutex
 }
 
-// NewWorkflowManager creates a new workflow manager
 func NewWorkflowManager(client *redis.Client, logger *logger.Logger) *WorkflowManager {
 	return &WorkflowManager{
 		redisClient: client,
@@ -40,36 +40,39 @@ func NewWorkflowManager(client *redis.Client, logger *logger.Logger) *WorkflowMa
 	}
 }
 
-// SaveWorkflow stores a workflow in Redis
 func (wm *WorkflowManager) SaveWorkflow(workflow *Workflow) error {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 
-	// Convert workflow to JSON
 	workflowJSON, err := workflow.ToJSON()
 	if err != nil {
 		return fmt.Errorf("error serializing workflow: %v", err)
 	}
 
-	// Store workflow data
 	key := fmt.Sprintf("%s%s", workflowKeyPrefix, workflow.ID)
-	err = wm.redisClient.Set(wm.ctx, key, workflowJSON, workflowTTL).Err()
-	if err != nil {
+	if err = wm.redisClient.Set(wm.ctx, key, workflowJSON, workflowTTL).Err(); err != nil {
 		return fmt.Errorf("error storing workflow: %v", err)
 	}
 
-	// Store workflow status for quick access
 	statusKey := fmt.Sprintf("%s:%s", workflowStatusKey, workflow.ID)
-	err = wm.redisClient.Set(wm.ctx, statusKey, string(workflow.Status), workflowTTL).Err()
-	if err != nil {
+	if err = wm.redisClient.Set(wm.ctx, statusKey, string(workflow.Status), workflowTTL).Err(); err != nil {
 		return fmt.Errorf("error storing workflow status: %v", err)
 	}
 
-	// If workflow is pending, add to queue
 	if workflow.Status == WorkflowStatusPending {
-		err = wm.redisClient.LPush(wm.ctx, workflowQueueKey, workflow.ID).Err()
+		// SetNX on a "queued" marker prevents double-enqueuing on repeated saves
+		queuedKey := fmt.Sprintf("workflow_queued:%s", workflow.ID)
+		added, err := wm.redisClient.SetNX(wm.ctx, queuedKey, "1", workflowTTL).Result()
 		if err != nil {
-			return fmt.Errorf("error adding workflow to queue: %v", err)
+			return fmt.Errorf("error checking workflow queue state: %v", err)
+		}
+		if added {
+			if err = wm.redisClient.LPush(wm.ctx, workflowQueueKey, workflow.ID).Err(); err != nil {
+				return fmt.Errorf("error adding workflow to queue: %v", err)
+			}
+			if err = wm.redisClient.LPush(wm.ctx, workflowIndexKey, workflow.ID).Err(); err != nil {
+				return fmt.Errorf("error adding workflow to index: %v", err)
+			}
 		}
 	}
 
@@ -77,15 +80,13 @@ func (wm *WorkflowManager) SaveWorkflow(workflow *Workflow) error {
 	return nil
 }
 
-// GetWorkflow retrieves a workflow from Redis
 func (wm *WorkflowManager) GetWorkflow(workflowID string) (*Workflow, error) {
 	key := fmt.Sprintf("%s%s", workflowKeyPrefix, workflowID)
 	workflowJSON, err := wm.redisClient.Get(wm.ctx, key).Result()
 
 	if err == redis.Nil {
-		return nil, fmt.Errorf("workflow %s not found", workflowID)
+		return nil, ErrWorkflowNotFound
 	}
-
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving workflow: %v", err)
 	}
@@ -98,90 +99,107 @@ func (wm *WorkflowManager) GetWorkflow(workflowID string) (*Workflow, error) {
 	return workflow, nil
 }
 
-// GetNextWorkflow gets the next pending workflow from the queue
 func (wm *WorkflowManager) GetNextWorkflow() (*Workflow, error) {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 
-	// Pop next workflow ID from queue
 	workflowID, err := wm.redisClient.RPop(wm.ctx, workflowQueueKey).Result()
-
 	if err == redis.Nil {
-		return nil, nil // No workflows in queue
+		return nil, nil
 	}
-
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving next workflow: %v", err)
 	}
 
-	// Get the workflow
 	return wm.GetWorkflow(workflowID)
 }
 
-// SaveStepResult stores a step's result in Redis
+// CompleteWorkflowStep marks a step done and re-enqueues the workflow so the
+// processor advances to the next ready steps on its next tick.
+func (wm *WorkflowManager) CompleteWorkflowStep(workflowID, stepID string, result map[string]interface{}) error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	workflow, err := wm.GetWorkflow(workflowID)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	if step, ok := workflow.Steps[stepID]; ok {
+		step.Status = StepStatusCompleted
+		step.CompletedAt = &now
+		if result != nil {
+			step.Result = result
+		}
+	}
+
+	if err := wm.saveWorkflowLocked(workflow); err != nil {
+		return err
+	}
+
+	return wm.redisClient.LPush(wm.ctx, workflowQueueKey, workflowID).Err()
+}
+
+// saveWorkflowLocked persists the workflow; caller must hold wm.mu.
+func (wm *WorkflowManager) saveWorkflowLocked(workflow *Workflow) error {
+	data, err := json.Marshal(workflow)
+	if err != nil {
+		return err
+	}
+	key := fmt.Sprintf("%s%s", workflowKeyPrefix, workflow.ID)
+	if err := wm.redisClient.Set(wm.ctx, key, string(data), workflowTTL).Err(); err != nil {
+		return err
+	}
+	statusKey := fmt.Sprintf("%s:%s", workflowStatusKey, workflow.ID)
+	return wm.redisClient.Set(wm.ctx, statusKey, string(workflow.Status), workflowTTL).Err()
+}
+
 func (wm *WorkflowManager) SaveStepResult(workflowID, stepID string, result map[string]interface{}) error {
 	resultKey := fmt.Sprintf("%s%s:%s", workflowResultsKey, workflowID, stepID)
-
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("error serializing step result: %v", err)
 	}
-
-	err = wm.redisClient.Set(wm.ctx, resultKey, string(resultJSON), workflowTTL).Err()
-	if err != nil {
-		return fmt.Errorf("error storing step result: %v", err)
-	}
-
-	return nil
+	return wm.redisClient.Set(wm.ctx, resultKey, string(resultJSON), workflowTTL).Err()
 }
 
-// GetStepResult retrieves a step's result from Redis
 func (wm *WorkflowManager) GetStepResult(workflowID, stepID string) (map[string]interface{}, error) {
 	resultKey := fmt.Sprintf("%s%s:%s", workflowResultsKey, workflowID, stepID)
-
 	resultJSON, err := wm.redisClient.Get(wm.ctx, resultKey).Result()
 
 	if err == redis.Nil {
 		return nil, fmt.Errorf("result for step %s in workflow %s not found", stepID, workflowID)
 	}
-
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving step result: %v", err)
 	}
 
 	var result map[string]interface{}
-	err = json.Unmarshal([]byte(resultJSON), &result)
-	if err != nil {
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 		return nil, fmt.Errorf("error deserializing step result: %v", err)
 	}
 
 	return result, nil
 }
 
-// ListWorkflows retrieves a list of workflow IDs with their status
 func (wm *WorkflowManager) ListWorkflows(limit, offset int) ([]map[string]interface{}, error) {
-	// Get workflow keys with pagination
-	pattern := fmt.Sprintf("%s*", workflowKeyPrefix)
-	keys, _, err := wm.redisClient.Scan(wm.ctx, uint64(offset), pattern, int64(limit)).Result()
+	start := int64(offset)
+	stop := int64(offset + limit - 1)
 
+	ids, err := wm.redisClient.LRange(wm.ctx, workflowIndexKey, start, stop).Result()
 	if err != nil {
-		return nil, fmt.Errorf("error scanning workflows: %v", err)
+		return nil, fmt.Errorf("error listing workflows: %v", err)
 	}
 
-	workflows := make([]map[string]interface{}, 0, len(keys))
-
-	for _, key := range keys {
-		// Extract workflow ID from key
-		workflowID := key[len(workflowKeyPrefix):]
-
-		// Get workflow data
+	workflows := make([]map[string]interface{}, 0, len(ids))
+	for _, workflowID := range ids {
 		workflow, err := wm.GetWorkflow(workflowID)
 		if err != nil {
 			wm.logger.Error(fmt.Sprintf("Error retrieving workflow %s: %v", workflowID, err))
 			continue
 		}
 
-		// Create summarized info
 		summary := map[string]interface{}{
 			"id":         workflow.ID,
 			"name":       workflow.Name,
@@ -189,11 +207,9 @@ func (wm *WorkflowManager) ListWorkflows(limit, offset int) ([]map[string]interf
 			"created_at": workflow.CreatedAt,
 			"step_count": len(workflow.Steps),
 		}
-
 		if workflow.StartedAt != nil {
 			summary["started_at"] = workflow.StartedAt
 		}
-
 		if workflow.FinishedAt != nil {
 			summary["finished_at"] = workflow.FinishedAt
 		}
@@ -204,36 +220,31 @@ func (wm *WorkflowManager) ListWorkflows(limit, offset int) ([]map[string]interf
 	return workflows, nil
 }
 
-// DeleteWorkflow removes a workflow and its data from Redis
 func (wm *WorkflowManager) DeleteWorkflow(workflowID string) error {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 
-	// Get workflow first to get step IDs
 	workflow, err := wm.GetWorkflow(workflowID)
 	if err != nil {
 		return err
 	}
 
-	// Delete workflow data
 	key := fmt.Sprintf("%s%s", workflowKeyPrefix, workflowID)
-	err = wm.redisClient.Del(wm.ctx, key).Err()
-	if err != nil {
+	if err = wm.redisClient.Del(wm.ctx, key).Err(); err != nil {
 		return fmt.Errorf("error deleting workflow: %v", err)
 	}
 
-	// Delete workflow status
 	statusKey := fmt.Sprintf("%s:%s", workflowStatusKey, workflowID)
-	err = wm.redisClient.Del(wm.ctx, statusKey).Err()
-	if err != nil {
+	if err = wm.redisClient.Del(wm.ctx, statusKey).Err(); err != nil {
 		return fmt.Errorf("error deleting workflow status: %v", err)
 	}
 
-	// Delete step results
+	wm.redisClient.Del(wm.ctx, fmt.Sprintf("workflow_queued:%s", workflowID))
+	wm.redisClient.LRem(wm.ctx, workflowIndexKey, 0, workflowID)
+
 	for stepID := range workflow.Steps {
 		resultKey := fmt.Sprintf("%s%s:%s", workflowResultsKey, workflowID, stepID)
-		err = wm.redisClient.Del(wm.ctx, resultKey).Err()
-		if err != nil {
+		if err = wm.redisClient.Del(wm.ctx, resultKey).Err(); err != nil {
 			wm.logger.Error(fmt.Sprintf("Error deleting step result: %v", err))
 		}
 	}

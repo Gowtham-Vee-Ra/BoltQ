@@ -1,392 +1,153 @@
-# BoltQ: Distributed Task Queue
+# BoltQ
 
-BoltQ is a scalable, event-driven distributed task queue system built with Go and Redis. It enables asynchronous job processing by decoupling job submission from execution, ensuring efficient resource utilization and fault tolerance.
+A distributed task queue built with Go and Redis. Jobs are submitted via a REST API, stored in priority queues, and processed by a configurable worker pool. A React playground ships alongside for submitting and monitoring jobs in the browser.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
-- [API Documentation](#api-documentation)
-- [Monitoring](#monitoring)
-- [Development](#development)
-- [Testing](#testing)
-- [Contributing](#contributing)
-- [License](#license)
-
-## Overview
-
-BoltQ provides a robust solution for handling asynchronous tasks in your applications. Jobs are submitted via a REST API, stored in Redis, and processed by configurable worker pools. The system includes comprehensive monitoring and observability features to track job progress and system health.
-
-### System Flow
-
-```
- ┌────────────┐       ┌───────────────┐       ┌─────────────┐
- │            │       │               │       │             │
- │  Clients   │──────▶│   API Server  │──────▶│ Redis Queue │
- │            │       │               │       │             │
- └────────────┘       └───────────────┘       └──────┬──────┘
-                                                     │
-                                                     ▼
-                                              ┌─────────────┐
-                                              │             │
-                                              │ Worker Pool │
-                                              │             │
-                                              └──────┬──────┘
-                                                     │
-                           ┌───────────────┬────────┴────────┬───────────────┐
-                           │               │                 │               │
-                           ▼               ▼                 ▼               ▼
-                     ┌───────────┐   ┌───────────┐    ┌───────────┐   ┌───────────┐
-                     │ Worker 1  │   │ Worker 2  │    │ Worker 3  │   │ Worker N  │
-                     └───────────┘   └───────────┘    └───────────┘   └───────────┘
-```
-
-### Monitoring Architecture
-
-```
- ┌────────────┐       ┌───────────────┐       ┌─────────────┐
- │            │       │               │       │             │
- │  API       │──────▶│   Prometheus  │──────▶│  Grafana    │
- │  Worker    │       │               │       │             │
- └────────────┘       └───────────────┘       └─────────────┘
-        │                                             ▲
-        │                                             │
-        ▼                                             │
- ┌────────────┐       ┌───────────────┐               │
- │            │       │               │               │
- │  Jaeger    │──────▶│ OpenTelemetry │───────────────┘
- │  Tracing   │       │               │
- └────────────┘       └───────────────┘
-```
-
-## Features
-
-- **Asynchronous Job Processing**: Decouple job submission from execution
-- **Priority Queues**: Support for high, normal, and low priority jobs
-- **Delayed Execution**: Schedule jobs to run at a future time
-- **Job Workflows**: Define complex job pipelines with dependencies
-- **Error Handling**: Sophisticated error categorization and recovery
-- **Automatic Retries**: Exponential backoff retry mechanism
-- **Dead Letter Queue**: Failed jobs are stored for analysis
-- **Concurrent Processing**: Worker pool architecture for parallel processing
-- **Real-time Updates**: WebSocket support for live job status updates
-- **Monitoring**: Prometheus metrics and Grafana dashboards
-- **Tracing**: Distributed tracing with OpenTelemetry and Jaeger
-- **Structured Logging**: JSON logging for better observability
-- **Web Playground**: Interactive UI for job submission and monitoring
-
-## Architecture
-
-BoltQ uses a modular architecture with the following components:
-
-### API Service
-
-The API service provides RESTful endpoints for job submission, status checking, and system monitoring. It communicates with Redis to store jobs in appropriate queues based on priority and scheduling requirements.
-
-### Redis Queue
-
-Redis serves as the message broker, storing jobs in various queues. It supports:
-- Priority queues (high, normal, low)
-- Delayed job scheduling using sorted sets
-- Job status tracking
-- Dead letter queue for failed jobs
-
-### Worker Service
-
-The worker service pulls jobs from Redis queues and processes them according to their type. Features include:
-- Configurable worker pool size
-- Job processor registration system
-- Automatic retries with exponential backoff
-- Error handling and categorization
-- Metrics collection
-
-### Playground Frontend
-
-A web-based UI provides easy access to BoltQ's features, allowing users to:
-- Submit and monitor jobs
-- View system statistics
-- Access Grafana dashboards
-- Track job workflows
-
-## Project Structure
-
-```
-BoltQ/
-├── cmd/                         # Application entry points
-│   ├── api/                     # API service
-│   ├── worker/                  # Worker service
-│   └── test/                    # Test utilities
-├── internal/                    # Internal packages
-│   ├── api/                     # API implementation
-│   │   ├── handler.go           # Request handlers
-│   │   ├── dashboard.go         # Dashboard endpoints
-│   │   └── websocket.go         # WebSocket implementation
-│   ├── job/                     # Job models and workflows
-│   │   ├── workflow.go          # Workflow implementation
-│   │   └── workflow_manager.go  # Workflow management
-│   ├── queue/                   # Queue implementations
-│   │   ├── queue.go             # Queue interface
-│   │   ├── redis_queue.go       # Redis implementation
-│   │   ├── redis_adapter.go     # Interface adapter
-│   │   └── factory.go           # Queue factory
-│   └── worker/                  # Worker implementation
-│       ├── pool.go              # Worker pool
-│       ├── error_handler.go     # Error handling
-│       └── delayed_processor.go # Delayed job processing
-├── pkg/                         # Public packages
-│   ├── config/                  # Configuration
-│   ├── logger/                  # Structured logging
-│   ├── metrics/                 # Prometheus metrics
-│   │   ├── metrics.go           # Metrics collector
-│   │   └── prometheus.go        # Prometheus implementation
-│   └── api/                     # OpenAPI specifications
-├── playground/                  # Frontend UI
-│   ├── src/
-│   │   ├── components/          # React components
-│   │   ├── pages/               # UI pages
-│   │   └── App.jsx              # Main application
-│   ├── public/                  # Static assets
-│   └── package.json             # Node dependencies
-├── grafana/                     # Grafana configuration
-│   └── provisioning/
-│       ├── dashboards/          # Dashboard definitions
-│       └── datasources/         # Data source config
-├── docker/                      # Docker configurations
-├── prometheus.yml               # Prometheus configuration
-├── docker-compose.yml           # Development setup
-├── docker-compose.prod.yml      # Production setup
-└── README.md                    # Project documentation
-```
-
-## Getting Started
-
-### Prerequisites
+## Prerequisites
 
 - Go 1.22+
 - Redis 7+
-- Node.js 20+ (for playground)
-- Docker and Docker Compose (optional)
+- Node.js 20+ (playground only)
+- A [Pusher Channels](https://pusher.com) account (notification jobs)
+- [Mailpit](https://mailpit.axllent.org) or any SMTP server (email jobs)
 
-### Running Locally
+## Setup
 
-#### Start Redis
+Copy `.env.example` to `.env` and fill in the values:
 
+```
+REDIS_ADDR=localhost:6379
+API_PORT=8080
+WORKER_METRICS_PORT=9094
+ALLOWED_ORIGIN=http://localhost:5173
+
+SMTP_HOST=localhost
+SMTP_PORT=1025
+SMTP_FROM=boltq@localhost
+
+PUSHER_APP_ID=
+PUSHER_KEY=
+PUSHER_SECRET=
+PUSHER_CLUSTER=
+```
+
+The playground reads `VITE_API_URL` from `playground/.env` (defaults to `http://localhost:8080`).
+
+## Running
+
+Start each service in a separate terminal.
+
+**Redis** (if not already running):
 ```bash
-# Using Docker
-docker run -d -p 6379:6379 redis:7-alpine
-
-# Or use your local Redis installation
 redis-server
 ```
 
-#### Start the API Service
-
+**API server:**
 ```bash
-cd cmd/api
-go run main.go
+go run ./cmd/api/
 ```
 
-#### Start the Worker Service
-
+**Worker:**
 ```bash
-cd cmd/worker
-go run main.go
+go run ./cmd/worker/
 ```
 
-#### Start the Playground Frontend
-
+**Playground:**
 ```bash
 cd playground
 npm install
 npm run dev
 ```
 
-### Running with Docker Compose
+Open `http://localhost:5173`.
 
-```bash
-# Build and start all services
-docker-compose up -d
+## Job types
 
-# View logs
-docker-compose logs -f
-```
+| Type | Required fields | What it does |
+|---|---|---|
+| `echo` | `message` | Returns input after a 1s delay |
+| `sleep` | `seconds` | Sleeps for up to 60s |
+| `email` | `to`, `subject`, `body` | Sends via SMTP (Mailpit in dev) |
+| `notification` | `message`, `recipient` | Fires a Pusher event to the playground |
+| `process-image` | `url`, `width`, `height`, `format` | Fetches, resizes, and saves JPEG/PNG |
+| `generate-report` | `report_type`, `format` | Writes CSV, HTML, and/or PDF to `output/reports/` |
 
-This will start:
-- Redis on port 6379
-- API service on port 8080
-- Worker service (internal)
-- Prometheus on port 9092
-- Grafana on port 3000
-- Playground frontend on port 5173
+For `generate-report`, `report_type` accepts `summary`, `monthly`, or `detailed`. `format` accepts `csv`, `html`, or `pdf` — omit to generate all three.
 
-### Environment Variables
+For `process-image`, `format` accepts `jpeg` or `png`. WebP and GIF are accepted as input but always output as JPEG.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `API_PORT` | API server port | 8080 |
-| `METRICS_PORT` | Metrics server port | 9090 |
-| `REDIS_ADDR` | Redis address | localhost:6379 |
-| `NUM_WORKERS` | Number of worker goroutines | 4 |
-| `MAX_ATTEMPTS` | Maximum retry attempts | 3 |
-| `ENVIRONMENT` | Environment (dev/prod) | development |
-
-## API Documentation
-
-### Job Submission
+## Submitting a job
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/jobs \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "echo",
-    "data": {
-      "message": "Hello World"
-    },
-    "priority": 1,
-    "delay_seconds": 0
-  }'
+  -d '{"type": "echo", "data": {"message": "hello"}, "priority": 1, "delay_seconds": 0}'
 ```
 
-### Job Status Check
+Priority: `2` = high, `1` = normal, `0` = low. `delay_seconds` schedules the job for future execution.
 
-```bash
-curl -X GET http://localhost:8080/api/v1/jobs/{job_id}
+## API endpoints
+
+```
+POST   /api/v1/jobs              submit a job
+GET    /api/v1/jobs              list jobs (limit, offset)
+GET    /api/v1/jobs/:id          get job status and result
+POST   /api/v1/jobs/:id/cancel   cancel a pending job
+
+GET    /api/v1/queues/stats      queue depths and dead letter count
+
+POST   /api/v1/workflows         create a workflow
+GET    /api/v1/workflows         list workflows
+GET    /api/v1/workflows/:id     get workflow detail
+DELETE /api/v1/workflows/:id     delete a workflow
+
+GET    /health                   API health check
+GET    /ws/jobs                  WebSocket — live job and workflow updates
 ```
 
-### Queue Stats
+## Workflows
 
-```bash
-curl -X GET http://localhost:8080/api/v1/queues/stats
-```
-
-### Workflow Submission
+A workflow is a DAG of jobs. Steps run in dependency order; independent steps run concurrently.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/workflows \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Data Processing Pipeline",
+    "name": "image then report",
     "steps": [
       {
-        "job_type": "fetch_data",
-        "params": {
-          "url": "https://example.com/data.csv"
-        }
+        "id": "step-a",
+        "job_type": "process-image",
+        "params": {"url": "https://example.com/photo.jpg", "width": 640, "height": 360, "format": "jpeg"}
       },
       {
-        "job_type": "process_data",
-        "params": {
-          "operation": "transform"
-        },
-        "depends_on": ["step-1"]
+        "id": "step-b",
+        "job_type": "generate-report",
+        "params": {"report_type": "summary", "format": "pdf"},
+        "depends_on": ["step-a"]
       }
     ]
   }'
 ```
 
-## Monitoring
+Client-generated step IDs let you reference dependencies before the workflow is created. If you omit `id`, UUIDs are assigned server-side — but you cannot then express `depends_on` between steps in the same request.
 
-### Prometheus Queries
+## Adding a job type
 
-Prometheus is available at http://localhost:9092. Useful queries include:
-
-- `boltq_jobs_submitted_total` - Total jobs submitted by type
-- `boltq_jobs_processed_total` - Total jobs processed by status
-- `boltq_jobs_in_queue` - Current queue depths
-- `boltq_job_processing_seconds` - Job processing time distribution
-- `boltq_active_workers` - Number of active workers
-
-### Grafana
-
-Grafana is available at http://localhost:3000 (login: admin/password) and includes:
-
-- **Job Dashboard** - Shows job submission rates, processing times, and queue depths
-- **Worker Dashboard** - Displays worker utilization and error rates
-- **System Dashboard** - Provides overall system health metrics
-
-## Development
-
-### Adding a New Job Type
-
-1. Register a processor in the worker service:
+Register a processor in `cmd/worker/main.go`:
 
 ```go
-// In cmd/worker/main.go
-workerPool.RegisterProcessor("new_job_type", func(ctx context.Context, task *queue.Task) (map[string]interface{}, error) {
-    // Job processing logic here
-    return result, nil
+workerPool.RegisterProcessor("my-job", func(ctx context.Context, task *queue.Task) (map[string]interface{}, error) {
+    // task.Data contains the fields from the job payload
+    return map[string]interface{}{"done": true}, nil
 })
 ```
 
-2. Submit jobs of the new type via the API:
+Then add it to the dropdown in `playground/src/components/JobForm.jsx`.
 
-```json
-{
-  "type": "new_job_type",
-  "data": {
-    "param1": "value1"
-  }
-}
-```
+## Output directories
 
-### Testing
+Processed images are saved to `./output/images/`. Reports are saved to `./output/reports/`. Both directories are created automatically. Set `IMAGE_OUTPUT_DIR` and `REPORT_OUTPUT_DIR` in `.env` to override.
 
-#### Unit Tests
+## Metrics
 
-```bash
-go test ./...
-```
-
-#### Integration Tests
-
-```bash
-go test -tags=integration ./...
-```
-
-#### Performance Testing
-
-```bash
-python cmd/test/performance_test.py --jobs=1000 --concurrency=10
-```
-
-### PowerShell Testing
-
-#### Submit a Job
-```powershell
-Invoke-WebRequest -Uri "http://localhost:8080/api/v1/jobs" `
-  -Method POST `
-  -ContentType "application/json" `
-  -Body '{
-    "type": "echo",
-    "data": {
-      "message": "Hello, BoltQ!"
-    },
-    "priority": 1
-  }' | ConvertFrom-Json
-```
-
-#### Check Job Status
-```powershell
-# Replace JOB_ID with actual ID
-$jobId = "your-job-id"
-Invoke-WebRequest -Uri "http://localhost:8080/api/v1/jobs/$jobId" `
-  -Method GET | ConvertFrom-Json
-```
-
-#### Get Queue Statistics
-```powershell
-Invoke-WebRequest -Uri "http://localhost:8080/api/v1/queues/stats" `
-  -Method GET | ConvertFrom-Json
-```
-
-## License
-
-[MIT License](LICENSE)
-
-## Acknowledgments
-
-- [Go Redis](https://github.com/redis/go-redis) library
-- [Gorilla Mux](https://github.com/gorilla/mux) for HTTP routing
+The worker exposes Prometheus metrics at `:9094/metrics`. The API exposes them at `:9093/metrics`.

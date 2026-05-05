@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { BoltIcon } from 'lucide-react';
+import NotificationToast from './NotificationToast';
 
 const Layout = () => {
   const location = useLocation();
@@ -60,6 +61,8 @@ const Layout = () => {
       <footer className="p-4 border-t border-gray-800 text-center text-gray-500 text-xs">
         © 2025 BoltQ. All rights reserved.
       </footer>
+
+      <NotificationToast />
     </div>
   );
 };

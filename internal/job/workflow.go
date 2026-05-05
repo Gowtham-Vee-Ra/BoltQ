@@ -1,4 +1,3 @@
-// internal/job/workflow.go
 package job
 
 import (
@@ -9,7 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// WorkflowStatus represents the current state of a workflow
 type WorkflowStatus string
 
 const (
@@ -19,7 +17,6 @@ const (
 	WorkflowStatusFailed    WorkflowStatus = "failed"
 )
 
-// WorkflowStepStatus represents the current state of a workflow step
 type WorkflowStepStatus string
 
 const (
@@ -30,7 +27,6 @@ const (
 	StepStatusSkipped   WorkflowStepStatus = "skipped"
 )
 
-// WorkflowStep represents a single job in a workflow
 type WorkflowStep struct {
 	ID           string                 `json:"id"`
 	JobType      string                 `json:"job_type"`
@@ -43,14 +39,13 @@ type WorkflowStep struct {
 	CompletedAt  *time.Time             `json:"completed_at,omitempty"`
 }
 
-// WorkflowStepInput represents input for a workflow step
 type WorkflowStepInput struct {
-	JobType   string                 `json:"job_type" example:"process_data"`
-	Params    map[string]interface{} `json:"params" example:"{\"input_file\":\"data.csv\"}"`
-	DependsOn []string               `json:"depends_on,omitempty" example:"[\"step-1\",\"step-2\"]"`
+	ID        string                 `json:"id,omitempty"`
+	JobType   string                 `json:"job_type"`
+	Params    map[string]interface{} `json:"params"`
+	DependsOn []string               `json:"depends_on,omitempty"`
 }
 
-// Workflow represents a collection of jobs that have dependencies between them
 type Workflow struct {
 	ID         string                   `json:"id"`
 	Name       string                   `json:"name"`
@@ -63,7 +58,6 @@ type Workflow struct {
 	Metadata   map[string]interface{}   `json:"metadata,omitempty"`
 }
 
-// NewWorkflow creates a new workflow with the given name
 func NewWorkflow(name string) *Workflow {
 	return &Workflow{
 		ID:        uuid.New().String(),
@@ -76,9 +70,18 @@ func NewWorkflow(name string) *Workflow {
 	}
 }
 
-// AddStep adds a new step to the workflow
 func (w *Workflow) AddStep(jobType string, params map[string]interface{}, dependsOn []string) string {
-	stepID := uuid.New().String()
+	return w.AddStepWithID("", jobType, params, dependsOn)
+}
+
+func (w *Workflow) AddStepWithID(id, jobType string, params map[string]interface{}, dependsOn []string) string {
+	stepID := id
+	if stepID == "" {
+		stepID = uuid.New().String()
+	}
+	if params == nil {
+		params = make(map[string]interface{})
+	}
 
 	step := &WorkflowStep{
 		ID:        stepID,
@@ -90,33 +93,28 @@ func (w *Workflow) AddStep(jobType string, params map[string]interface{}, depend
 
 	w.Steps[stepID] = step
 	w.StepOrder = append(w.StepOrder, stepID)
-
 	return stepID
 }
 
-// GetReadySteps returns all steps that are ready to be executed
 func (w *Workflow) GetReadySteps() []*WorkflowStep {
 	readySteps := make([]*WorkflowStep, 0)
 
 	for _, stepID := range w.StepOrder {
 		step := w.Steps[stepID]
-
-		// Skip steps that are already running, completed, failed, or skipped
 		if step.Status != StepStatusPending {
 			continue
 		}
 
-		// Check if all dependencies are satisfied
-		allDependenciesSatisfied := true
+		allDepsComplete := true
 		for _, depID := range step.DependsOn {
 			depStep, exists := w.Steps[depID]
 			if !exists || depStep.Status != StepStatusCompleted {
-				allDependenciesSatisfied = false
+				allDepsComplete = false
 				break
 			}
 		}
 
-		if allDependenciesSatisfied {
+		if allDepsComplete {
 			readySteps = append(readySteps, step)
 		}
 	}
@@ -124,7 +122,6 @@ func (w *Workflow) GetReadySteps() []*WorkflowStep {
 	return readySteps
 }
 
-// UpdateStepStatus updates the status of a step and potentially the workflow itself
 func (w *Workflow) UpdateStepStatus(stepID string, status WorkflowStepStatus, errorMsg string, result map[string]interface{}) error {
 	step, exists := w.Steps[stepID]
 	if !exists {
@@ -132,13 +129,11 @@ func (w *Workflow) UpdateStepStatus(stepID string, status WorkflowStepStatus, er
 	}
 
 	step.Status = status
-
 	now := time.Now()
 
 	switch status {
 	case StepStatusRunning:
 		step.StartedAt = &now
-		// If this is the first step to run, update workflow status
 		if w.Status == WorkflowStatusPending {
 			w.Status = WorkflowStatusRunning
 			w.StartedAt = &now
@@ -148,7 +143,6 @@ func (w *Workflow) UpdateStepStatus(stepID string, status WorkflowStepStatus, er
 		step.CompletedAt = &now
 		step.Result = result
 
-		// Check if all steps are complete
 		allComplete := true
 		for _, s := range w.Steps {
 			if s.Status != StepStatusCompleted && s.Status != StepStatusSkipped {
@@ -156,7 +150,6 @@ func (w *Workflow) UpdateStepStatus(stepID string, status WorkflowStepStatus, er
 				break
 			}
 		}
-
 		if allComplete {
 			w.Status = WorkflowStatusCompleted
 			w.FinishedAt = &now
@@ -165,35 +158,24 @@ func (w *Workflow) UpdateStepStatus(stepID string, status WorkflowStepStatus, er
 	case StepStatusFailed:
 		step.CompletedAt = &now
 		step.ErrorMessage = errorMsg
-
-		// Mark as failed, but check if we should skip dependent steps
 		w.Status = WorkflowStatusFailed
 		w.FinishedAt = &now
-
-		// Mark all dependent steps as skipped
 		w.skipDependentSteps(stepID)
 	}
 
 	return nil
 }
 
-// skipDependentSteps marks all steps that depend on the given step as skipped
 func (w *Workflow) skipDependentSteps(failedStepID string) {
 	for _, stepID := range w.StepOrder {
 		step := w.Steps[stepID]
-
-		// Skip steps that are already processed
 		if step.Status != StepStatusPending {
 			continue
 		}
-
-		// Check if this step depends on the failed step
 		for _, depID := range step.DependsOn {
 			if depID == failedStepID {
 				step.Status = StepStatusSkipped
 				step.ErrorMessage = fmt.Sprintf("Skipped because dependency %s failed", failedStepID)
-
-				// Recursively skip steps that depend on this one
 				w.skipDependentSteps(stepID)
 				break
 			}
@@ -201,7 +183,6 @@ func (w *Workflow) skipDependentSteps(failedStepID string) {
 	}
 }
 
-// ToJSON serializes the workflow to JSON
 func (w *Workflow) ToJSON() (string, error) {
 	bytes, err := json.Marshal(w)
 	if err != nil {
@@ -210,11 +191,9 @@ func (w *Workflow) ToJSON() (string, error) {
 	return string(bytes), nil
 }
 
-// FromJSON deserializes a workflow from JSON
 func WorkflowFromJSON(data string) (*Workflow, error) {
 	workflow := &Workflow{}
-	err := json.Unmarshal([]byte(data), workflow)
-	if err != nil {
+	if err := json.Unmarshal([]byte(data), workflow); err != nil {
 		return nil, err
 	}
 	return workflow, nil

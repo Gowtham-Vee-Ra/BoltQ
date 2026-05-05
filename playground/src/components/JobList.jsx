@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { Link } from 'react-router-dom';
 import { RefreshCw, AlertTriangle, Clock, CheckCircle, XCircle } from 'lucide-react';
 
@@ -6,119 +6,9 @@ import useApi from '../hooks/useApi';
 import { jobsApi } from '../services/api';
 import { formatDate, getStatusColor } from '../utils/format';
 
-// Sample data for demonstration
-const SAMPLE_JOBS = [
-  { 
-    id: 'j8f72h3f', 
-    type: 'echo', 
-    status: 'completed', 
-    created_at: '2025-03-22T10:30:00Z', 
-    priority: 1,
-    data: { message: "Hello World" }
-  },
-  { 
-    id: 'k39d7h2s', 
-    type: 'email', 
-    status: 'running', 
-    created_at: '2025-03-22T11:45:00Z', 
-    priority: 0,
-    data: { to: "user@example.com", subject: "Important notification" }
-  },
-  { 
-    id: 'l12e9p4q', 
-    type: 'process-image', 
-    status: 'failed', 
-    created_at: '2025-03-22T12:15:00Z', 
-    priority: 2,
-    error: "Invalid image format"
-  },
-  { 
-    id: 'm67b3v2r', 
-    type: 'generate-report', 
-    status: 'pending', 
-    created_at: '2025-03-23T09:00:00Z', 
-    priority: 1,
-    data: { reportType: "monthly", month: "March", year: 2025 }
-  },
-  { 
-    id: 'n45k9d3e', 
-    type: 'sleep', 
-    status: 'scheduled', 
-    created_at: '2025-03-23T09:30:00Z', 
-    scheduled_at: '2025-03-23T10:30:00Z', 
-    priority: 2,
-    data: { seconds: 30 }
-  },
-  { 
-    id: 'p78s5g2h', 
-    type: 'echo', 
-    status: 'completed', 
-    created_at: '2025-03-23T08:15:00Z', 
-    priority: 1,
-    data: { message: "Another test message" }
-  },
-  { 
-    id: 'q91t4j6k', 
-    type: 'email', 
-    status: 'retrying', 
-    created_at: '2025-03-22T16:45:00Z', 
-    priority: 0,
-    attempts: 2,
-    data: { to: "admin@example.com", subject: "System alert" }
-  },
-  { 
-    id: 'r23w8n5z', 
-    type: 'notification', 
-    status: 'completed', 
-    created_at: '2025-03-22T17:30:00Z', 
-    priority: 1,
-    data: { channel: "slack", message: "Deployment complete" }
-  }
-];
-
 const JobList = () => {
-  const [refreshInterval, setRefreshInterval] = useState(null);
-  const { data, loading, error, execute, setData } = useApi(jobsApi.getJobs, [], false);
+  const { data, loading, error, execute } = useApi(jobsApi.getJobs, [], true);
 
-  // Use sample data for demonstration purposes
-  useEffect(() => {
-    // Set initial sample data
-    setData({ data: SAMPLE_JOBS });
-    
-    // Simulate data refresh
-    const interval = setInterval(() => {
-      // Randomly update status of one job to simulate changes
-      const updatedJobs = [...SAMPLE_JOBS];
-      const randomIndex = Math.floor(Math.random() * updatedJobs.length);
-      const job = updatedJobs[randomIndex];
-      
-      // Simulate status changes
-      if (job.status === 'pending') {
-        job.status = 'running';
-      } else if (job.status === 'running') {
-        job.status = Math.random() > 0.2 ? 'completed' : 'failed';
-      } else if (job.status === 'scheduled') {
-        if (new Date(job.scheduled_at) < new Date()) {
-          job.status = 'pending';
-        }
-      } else if (job.status === 'retrying') {
-        job.status = Math.random() > 0.5 ? 'running' : 'failed';
-        job.attempts = (job.attempts || 0) + 1;
-      }
-      
-      setData({ data: updatedJobs });
-    }, 5000);
-    
-    setRefreshInterval(interval);
-    
-    return () => {
-      if (refreshInterval) {
-        clearInterval(refreshInterval);
-      }
-    };
-  }, []);
-
-  // Get status icon based on job status
   const getStatusIcon = (status, size = 16) => {
     switch (status?.toLowerCase()) {
       case 'completed':
@@ -216,9 +106,9 @@ const JobList = () => {
                   </td>
                   <td className="p-3">{formatDate(job.created_at)}</td>
                   <td className="p-3">
-                    {job.priority === 0 ? 'High' : 
-                     job.priority === 1 ? 'Normal' : 
-                     job.priority === 2 ? 'Low' : job.priority}
+                    {job.priority === 2 ? 'High' :
+                     job.priority === 1 ? 'Normal' :
+                     job.priority === 0 ? 'Low' : job.priority}
                   </td>
                   <td className="p-3 text-right">
                     <Link to={`/jobs/${job.id}`} className="text-cyan-400 hover:underline">
@@ -232,7 +122,6 @@ const JobList = () => {
         </div>
       )}
       
-      {/* Filter and pagination controls */}
       <div className="mt-6 flex flex-col md:flex-row justify-between items-center">
         <div className="flex items-center gap-4 mb-4 md:mb-0">
           <div>

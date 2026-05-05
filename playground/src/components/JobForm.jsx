@@ -83,6 +83,7 @@ const JobForm = () => {
             <option value="echo">Echo</option>
             <option value="sleep">Sleep</option>
             <option value="email">Email</option>
+            <option value="notification">Notification</option>
             <option value="process-image">Process Image</option>
             <option value="generate-report">Generate Report</option>
           </select>
@@ -106,9 +107,9 @@ const JobForm = () => {
               onChange={(e) => setPriority(e.target.value)}
               className="w-full bg-gray-900 text-white border-2 border-gray-700 rounded p-2"
             >
-              <option value="0">High</option>
+              <option value="2">High</option>
               <option value="1">Normal</option>
-              <option value="2">Low</option>
+              <option value="0">Low</option>
             </select>
           </div>
           
@@ -148,56 +149,65 @@ const JobForm = () => {
       {/* Quick templates */}
       <div className="mt-6 border-2 border-gray-700 rounded-lg p-6">
         <h3 className="text-xl mb-4">Quick Templates</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <button
-            onClick={() => {
-              setJobType('echo');
-              setJsonData(JSON.stringify({ message: "Hello from BoltQ!" }, null, 2));
-            }}
-            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900"
+            onClick={() => { setJobType('echo'); setJsonData(JSON.stringify({ message: "Hello from BoltQ!" }, null, 2)); }}
+            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900 text-left"
           >
-            Echo Message
+            <div className="font-medium mb-1">Echo</div>
+            <div className="text-xs text-gray-400">Returns whatever you send it</div>
           </button>
-          
+
           <button
-            onClick={() => {
-              setJobType('sleep');
-              setJsonData(JSON.stringify({ seconds: 5 }, null, 2));
-            }}
-            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900"
+            onClick={() => { setJobType('sleep'); setJsonData(JSON.stringify({ seconds: 5 }, null, 2)); }}
+            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900 text-left"
           >
-            Sleep Job
+            <div className="font-medium mb-1">Sleep</div>
+            <div className="text-xs text-gray-400">Waits N seconds then completes</div>
           </button>
-          
+
           <button
             onClick={() => {
               setJobType('email');
-              setJsonData(JSON.stringify({
-                to: "user@example.com",
-                subject: "Test Email",
-                body: "This is a test email from BoltQ"
-              }, null, 2));
+              setJsonData(JSON.stringify({ to: "user@example.com", subject: "Hello from BoltQ", body: "This is a test email." }, null, 2));
             }}
-            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900"
+            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900 text-left"
           >
-            Email Job
+            <div className="font-medium mb-1">Email</div>
+            <div className="text-xs text-gray-400">Simulates sending an email</div>
           </button>
-          
+
+          <button
+            onClick={() => {
+              setJobType('notification');
+              setJsonData(JSON.stringify({ message: "Your job has completed.", recipient: "Gowtham", channel: "general" }, null, 2));
+            }}
+            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900 text-left"
+          >
+            <div className="font-medium mb-1">Notification</div>
+            <div className="text-xs text-gray-400">Simulates a push notification</div>
+          </button>
+
+          <button
+            onClick={() => {
+              setJobType('process-image');
+              setJsonData(JSON.stringify({ url: "https://example.com/photo.jpg", width: 1280, height: 720, format: "webp" }, null, 2));
+            }}
+            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900 text-left"
+          >
+            <div className="font-medium mb-1">Process Image</div>
+            <div className="text-xs text-gray-400">Simulates resize + format conversion</div>
+          </button>
+
           <button
             onClick={() => {
               setJobType('generate-report');
-              setJsonData(JSON.stringify({
-                reportType: "monthly",
-                format: "pdf",
-                data: {
-                  month: "March",
-                  year: 2025
-                }
-              }, null, 2));
+              setJsonData(JSON.stringify({ report_type: "monthly", format: "pdf" }, null, 2));
             }}
-            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900"
+            className="p-3 border border-gray-700 rounded hover:border-yellow-400 hover:bg-gray-900 text-left"
           >
-            Report Job
+            <div className="font-medium mb-1">Generate Report</div>
+            <div className="text-xs text-gray-400">Simulates generating a PDF report</div>
           </button>
         </div>
       </div>

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -9,7 +10,6 @@ import (
 	"BoltQ/pkg/metrics"
 )
 
-// DelayedJobProcessor is responsible for moving ready delayed jobs to regular queues
 type DelayedJobProcessor struct {
 	queue        *queue.RedisQueue
 	logger       *logger.Logger
@@ -20,7 +20,6 @@ type DelayedJobProcessor struct {
 	processCount int64
 }
 
-// NewDelayedJobProcessor creates a new processor for delayed jobs
 func NewDelayedJobProcessor(queue *queue.RedisQueue, logger *logger.Logger, metrics *metrics.MetricsCollector) *DelayedJobProcessor {
 	return &DelayedJobProcessor{
 		queue:    queue,
@@ -30,14 +29,12 @@ func NewDelayedJobProcessor(queue *queue.RedisQueue, logger *logger.Logger, metr
 	}
 }
 
-// Start begins the processing of delayed jobs at regular intervals
 func (p *DelayedJobProcessor) Start(interval time.Duration) {
 	p.ticker = time.NewTicker(interval)
 	p.wg.Add(1)
 
 	go func() {
 		defer p.wg.Done()
-
 		for {
 			select {
 			case <-p.ticker.C:
@@ -52,24 +49,18 @@ func (p *DelayedJobProcessor) Start(interval time.Duration) {
 	p.logger.Info("Delayed job processor started")
 }
 
-// Stop gracefully stops the processor
 func (p *DelayedJobProcessor) Stop() {
 	close(p.stopChan)
 	p.wg.Wait()
 	p.logger.Info("Delayed job processor stopped")
 }
 
-// processDelayedJobs moves ready jobs from delayed queue to regular queues
 func (p *DelayedJobProcessor) processDelayedJobs() {
 	startTime := time.Now()
-
-	// Record metrics for monitoring
 	defer func() {
-		processingTime := time.Since(startTime).Seconds()
-		p.metrics.RecordDelayedJobProcessorRun(processingTime)
+		p.metrics.RecordDelayedJobProcessorRun(time.Since(startTime).Seconds())
 	}()
 
-	// Process all jobs that are ready
 	count, err := p.queue.ProcessDelayedTasks()
 	if err != nil {
 		p.logger.Error("Error processing delayed tasks: " + err.Error())
@@ -79,11 +70,10 @@ func (p *DelayedJobProcessor) processDelayedJobs() {
 	if count > 0 {
 		p.processCount += int64(count)
 		p.metrics.RecordDelayedJobsProcessed(count)
-		p.logger.Info("Processed " + string(count) + " delayed tasks")
+		p.logger.Info(fmt.Sprintf("Processed %d delayed tasks", count))
 	}
 }
 
-// GetProcessCount returns the total number of processed delayed jobs
 func (p *DelayedJobProcessor) GetProcessCount() int64 {
 	return p.processCount
 }

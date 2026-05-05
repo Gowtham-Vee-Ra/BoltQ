@@ -1,4 +1,9 @@
 bin/
+*.exe
 *.log
 *.out
+
 .env
+.claude/
+
+output/

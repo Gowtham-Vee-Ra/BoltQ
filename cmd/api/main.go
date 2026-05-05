@@ -1,4 +1,3 @@
-// cmd/api/main.go
 package main
 
 import (
@@ -21,30 +20,26 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/rs/cors" // 🆕 Added CORS package
+	"github.com/rs/cors"
 )
 
 func main() {
-	// Initialize logger
 	log := logger.NewLogger("api")
 	log.Info("Starting BoltQ API Service...")
 
-	// Load .env variables
 	if err := godotenv.Load(); err != nil {
 		log.Error("No .env file found or couldn't load it")
 	}
 
-	// Load configuration
 	apiPort := config.GetEnv("API_PORT", "8080")
 	metricsPort := config.GetEnv("METRICS_PORT", "9093")
 	redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
+	allowedOrigin := config.GetEnv("ALLOWED_ORIGIN", "http://localhost:5173")
 
-	// Initialize Redis client
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: redisAddr,
 	})
 
-	// Ping Redis to make sure it's available
 	ctx := context.Background()
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		log.Error(fmt.Sprintf("Failed to connect to Redis: %v", err))
@@ -52,40 +47,26 @@ func main() {
 	}
 	log.Info(fmt.Sprintf("Connected to Redis at %s", redisAddr))
 
-	// Initialize metrics collector
 	metricsCollector := metrics.NewMetricsCollector("api")
-
-	// Initialize queue
 	redisQueue := queue.NewRedisQueue(redisClient, log)
-
-	// Initialize workflow manager
 	workflowManager := job.NewWorkflowManager(redisClient, log)
 
-	// Initialize WebSocket manager
-	websocketManager := api.NewWebSocketManager(redisClient, log)
+	websocketManager := api.NewWebSocketManager(redisClient, log, allowedOrigin)
 	websocketManager.Start()
 
-	// Initialize API handler
 	apiHandler := api.NewHandler(redisQueue, log, metricsCollector, workflowManager)
 
-	// Create router
 	router := mux.NewRouter()
-
-	// Register API routes
 	apiHandler.RegisterRoutes(router)
-
-	// Register WebSocket route
 	router.HandleFunc("/ws/jobs", websocketManager.HandleJobUpdatesWebSocket)
 
-	// 🆕 CORS middleware wrapping the router
 	corsHandler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:5173"},
+		AllowedOrigins:   []string{allowedOrigin},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"*"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
 		AllowCredentials: true,
 	}).Handler(router)
 
-	// API server with CORS-enabled handler
 	apiServer := &http.Server{
 		Addr:         ":" + apiPort,
 		Handler:      corsHandler,
@@ -94,7 +75,6 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Metrics server
 	metricsRouter := mux.NewRouter()
 	metricsRouter.Handle("/metrics", promhttp.Handler())
 
@@ -103,7 +83,6 @@ func main() {
 		Handler: metricsRouter,
 	}
 
-	// Start API server
 	go func() {
 		log.Info(fmt.Sprintf("API server listening on port %s", apiPort))
 		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -112,7 +91,6 @@ func main() {
 		}
 	}()
 
-	// Start metrics server
 	go func() {
 		log.Info(fmt.Sprintf("Metrics server listening on port %s", metricsPort))
 		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -120,10 +98,8 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown handling
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
 	<-quit
 	log.Info("Shutting down servers...")
 
@@ -133,12 +109,10 @@ func main() {
 	if err := apiServer.Shutdown(shutdownCtx); err != nil {
 		log.Error(fmt.Sprintf("API server shutdown error: %v", err))
 	}
-
 	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
 		log.Error(fmt.Sprintf("Metrics server shutdown error: %v", err))
 	}
 
 	websocketManager.Stop()
-
 	log.Info("Servers stopped")
 }

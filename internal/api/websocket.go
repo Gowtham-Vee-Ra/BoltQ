@@ -1,4 +1,3 @@
-// internal/api/websocket.go
 package api
 
 import (
@@ -17,27 +16,12 @@ import (
 )
 
 const (
-	// Time allowed to write a message to the peer
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period (must be less than pongWait)
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	// Allow all origins for development; in production, restrict this
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
-// WebSocketManager handles WebSocket connections and real-time updates
 type WebSocketManager struct {
 	redisClient     *redis.Client
 	logger          *logger.Logger
@@ -49,11 +33,11 @@ type WebSocketManager struct {
 	cancel          context.CancelFunc
 	jobChannel      string
 	workflowChannel string
+	allowedOrigin   string
 	mu              sync.Mutex
 }
 
-// NewWebSocketManager creates a new WebSocket manager
-func NewWebSocketManager(client *redis.Client, logger *logger.Logger) *WebSocketManager {
+func NewWebSocketManager(client *redis.Client, logger *logger.Logger, allowedOrigin string) *WebSocketManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &WebSocketManager{
@@ -67,20 +51,17 @@ func NewWebSocketManager(client *redis.Client, logger *logger.Logger) *WebSocket
 		cancel:          cancel,
 		jobChannel:      "job_updates",
 		workflowChannel: "workflow_updates",
+		allowedOrigin:   allowedOrigin,
 	}
 }
 
-// Start begins the WebSocket manager
 func (wm *WebSocketManager) Start() {
 	go wm.run()
 	go wm.subscribeToRedis()
 }
 
-// Stop gracefully shuts down the WebSocket manager
 func (wm *WebSocketManager) Stop() {
 	wm.cancel()
-
-	// Close all client connections
 	wm.mu.Lock()
 	for client := range wm.clients {
 		client.Close()
@@ -88,7 +69,6 @@ func (wm *WebSocketManager) Stop() {
 	wm.mu.Unlock()
 }
 
-// run handles WebSocket events
 func (wm *WebSocketManager) run() {
 	for {
 		select {
@@ -120,31 +100,24 @@ func (wm *WebSocketManager) run() {
 	}
 }
 
-// sendMessage sends a message to a specific client
 func (wm *WebSocketManager) sendMessage(client *websocket.Conn, message []byte) {
 	client.SetWriteDeadline(time.Now().Add(writeWait))
-
 	w, err := client.NextWriter(websocket.TextMessage)
 	if err != nil {
 		client.Close()
 		return
 	}
-
 	w.Write(message)
-
 	if err := w.Close(); err != nil {
 		client.Close()
-		return
 	}
 }
 
-// subscribeToRedis subscribes to Redis PubSub channels for updates
 func (wm *WebSocketManager) subscribeToRedis() {
 	pubsub := wm.redisClient.Subscribe(wm.ctx, wm.jobChannel, wm.workflowChannel)
 	defer pubsub.Close()
 
 	ch := pubsub.Channel()
-
 	for {
 		select {
 		case msg := <-ch:
@@ -155,23 +128,24 @@ func (wm *WebSocketManager) subscribeToRedis() {
 	}
 }
 
-// HandleJobUpdatesWebSocket handles WebSocket connections for job updates
 func (wm *WebSocketManager) HandleJobUpdatesWebSocket(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return r.Header.Get("Origin") == wm.allowedOrigin
+		},
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		wm.logger.Error(fmt.Sprintf("Error upgrading connection to WebSocket: %v", err))
 		return
 	}
 
-	// Register the client
 	wm.register <- conn
+	defer func() { wm.unregister <- conn }()
 
-	// Unregister client when the function returns
-	defer func() {
-		wm.unregister <- conn
-	}()
-
-	// Set up connection parameters
 	conn.SetReadLimit(maxMessageSize)
 	conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error {
@@ -179,7 +153,7 @@ func (wm *WebSocketManager) HandleJobUpdatesWebSocket(w http.ResponseWriter, r *
 		return nil
 	})
 
-	// Listen for messages from the client (not used but needed to keep connection alive)
+	// read loop keeps the connection alive; we don't process client messages
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
@@ -191,7 +165,6 @@ func (wm *WebSocketManager) HandleJobUpdatesWebSocket(w http.ResponseWriter, r *
 	}
 }
 
-// PublishJobUpdate publishes a job update to all connected clients
 func (wm *WebSocketManager) PublishJobUpdate(jobID, status string, data map[string]interface{}) error {
 	message := map[string]interface{}{
 		"type":      "job_update",
@@ -200,16 +173,13 @@ func (wm *WebSocketManager) PublishJobUpdate(jobID, status string, data map[stri
 		"data":      data,
 		"timestamp": time.Now(),
 	}
-
 	jsonMessage, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
-
 	return wm.redisClient.Publish(wm.ctx, wm.jobChannel, string(jsonMessage)).Err()
 }
 
-// PublishWorkflowUpdate publishes a workflow update to all connected clients
 func (wm *WebSocketManager) PublishWorkflowUpdate(workflowID string, status job.WorkflowStatus, data map[string]interface{}) error {
 	message := map[string]interface{}{
 		"type":        "workflow_update",
@@ -218,11 +188,9 @@ func (wm *WebSocketManager) PublishWorkflowUpdate(workflowID string, status job.
 		"data":        data,
 		"timestamp":   time.Now(),
 	}
-
 	jsonMessage, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
-
 	return wm.redisClient.Publish(wm.ctx, wm.workflowChannel, string(jsonMessage)).Err()
 }
