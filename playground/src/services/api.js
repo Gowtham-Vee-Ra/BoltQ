@@ -1,4 +1,7 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+// Use `??` (not `||`) so an explicitly empty VITE_API_URL means "same origin":
+// in production the app is served behind nginx, which proxies /api/ and injects
+// the API key. Falls back to the dev API server only when the var is undefined.
+const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8080';
 const API_URL = `${API_BASE_URL}/api/v1`;
 
 const request = async (endpoint, options = {}) => {

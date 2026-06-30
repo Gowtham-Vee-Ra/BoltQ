@@ -1,18 +1,35 @@
-FROM golang:1.22-alpine
+# syntax=docker/dockerfile:1
+
+# ---- Build stage ----
+FROM golang:1.24-alpine AS build
+
+WORKDIR /src
+
+# Download dependencies first so this layer is cached across source changes
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the source and compile static binaries (CGO disabled -> no libc dependency)
+COPY . .
+ENV CGO_ENABLED=0 GOOS=linux
+RUN go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api \
+ && go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
+
+# ---- Runtime stage ----
+FROM alpine:3.20
 
 WORKDIR /app
 
-# Install build dependencies and curl for healthcheck
-RUN apk add --no-cache gcc musl-dev curl
+# ca-certificates for outbound TLS (Pusher, image fetch); curl for container healthchecks
+RUN apk add --no-cache ca-certificates curl \
+ && adduser -D -u 10001 boltq \
+ && mkdir -p /app/bin /app/output/images /app/output/reports \
+ && chown -R boltq:boltq /app
 
-# Copy go mod and sum files
-COPY go.mod go.sum ./
+COPY --from=build /out/api  /app/bin/api
+COPY --from=build /out/worker /app/bin/worker
 
-# Download dependencies
-RUN go mod download
+USER boltq
 
-# Copy the source code
-COPY . .
-
-# Default command (will be overridden in docker-compose)
-CMD ["go", "run", "cmd/api/main.go"]
+# Default to the API; docker-compose overrides command per service.
+CMD ["./bin/api"]

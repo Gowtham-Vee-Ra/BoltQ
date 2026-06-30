@@ -1,0 +1,16 @@
+# Development image: keeps the full Go toolchain so docker-compose.yml can
+# `go run` against the mounted source for live editing. Production builds use
+# the multi-stage ./Dockerfile instead.
+FROM golang:1.24-alpine
+
+WORKDIR /app
+
+# curl for container healthchecks
+RUN apk add --no-cache curl
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+CMD ["go", "run", "cmd/api/main.go"]

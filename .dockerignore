@@ -1,0 +1,24 @@
+# Keep the Go build context small and free of secrets/cruft.
+.git
+.gitignore
+.env
+*.env
+!/.env.example
+
+# Node / frontend (the Go image never needs these)
+playground/node_modules
+playground/dist
+
+# Generated output and local artifacts
+output/
+bin/
+*.exe
+*.log
+*.out
+
+# Docs and editor config
+HOSTING.md
+README.md
+.claude/
+.vscode/
+.idea/

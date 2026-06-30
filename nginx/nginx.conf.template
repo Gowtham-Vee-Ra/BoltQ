@@ -73,6 +73,11 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
+
+            # Inject the API key server-side so the static frontend never holds
+            # the secret. ${API_KEY} is substituted from the environment at
+            # container start (envsubst, NGINX_ENVSUBST_FILTER=API_KEY).
+            proxy_set_header X-API-Key "${API_KEY}";
         }
         
         # WebSocket endpoint

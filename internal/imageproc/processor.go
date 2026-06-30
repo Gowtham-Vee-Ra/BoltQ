@@ -5,7 +5,9 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +50,15 @@ func Process(in Input) (*Result, error) {
 		return nil, fmt.Errorf("cannot create output dir: %w", err)
 	}
 
+	// Only fetch over http(s); reject file://, gopher://, data://, etc.
+	parsed, err := url.Parse(in.URL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("unsupported URL scheme %q: only http and https are allowed", parsed.Scheme)
+	}
+
 	// CDNs like Wikimedia block Go's default User-Agent
 	req, err := http.NewRequest(http.MethodGet, in.URL, nil)
 	if err != nil {
@@ -55,7 +66,9 @@ func Process(in Input) (*Result, error) {
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; BoltQ/1.0; +https://github.com/Gowtham-Vee-Ra/BoltQ)")
 
-	resp, err := http.DefaultClient.Do(req)
+	// safeHTTPClient blocks requests that resolve to private/loopback/link-local
+	// addresses (SSRF guard) and bounds the fetch with a timeout.
+	resp, err := safeHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
@@ -64,8 +77,11 @@ func Process(in Input) (*Result, error) {
 		return nil, fmt.Errorf("fetch returned HTTP %d", resp.StatusCode)
 	}
 
+	// Bound how many bytes we read so a huge/slow response can't exhaust memory.
+	body := io.LimitReader(resp.Body, maxFetchBytes+1)
+
 	// imaging decodes JPEG, PNG, GIF, BMP, TIFF, WebP; only JPEG/PNG for output
-	src, err := imaging.Decode(resp.Body, imaging.AutoOrientation(true))
+	src, err := imaging.Decode(body, imaging.AutoOrientation(true))
 	if err != nil {
 		return nil, fmt.Errorf("decode failed: %w", err)
 	}

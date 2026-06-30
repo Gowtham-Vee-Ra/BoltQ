@@ -20,6 +20,11 @@ API_PORT=8080
 WORKER_METRICS_PORT=9094
 ALLOWED_ORIGIN=http://localhost:5173
 
+# Required in production — protects mutating endpoints. Empty = unauthenticated (dev only).
+API_KEY=
+RATE_LIMIT_RPS=20
+RATE_LIMIT_BURST=40
+
 SMTP_HOST=localhost
 SMTP_PORT=1025
 SMTP_FROM=boltq@localhost
@@ -28,6 +33,19 @@ PUSHER_APP_ID=
 PUSHER_KEY=
 PUSHER_SECRET=
 PUSHER_CLUSTER=
+```
+
+### Authentication
+
+When `API_KEY` is set, mutating requests (submit job, cancel job, create/delete
+workflow) must include the key; read-only endpoints stay open. Requests are also
+rate-limited per client IP (`RATE_LIMIT_RPS` / `RATE_LIMIT_BURST`).
+
+```bash
+curl -X POST http://localhost:8080/api/v1/jobs \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "echo", "data": {"message": "hello"}}'
 ```
 
 The playground reads `VITE_API_URL` from `playground/.env` (defaults to `http://localhost:8080`).

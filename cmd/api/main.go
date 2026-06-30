@@ -35,6 +35,9 @@ func main() {
 	metricsPort := config.GetEnv("METRICS_PORT", "9093")
 	redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
 	allowedOrigin := config.GetEnv("ALLOWED_ORIGIN", "http://localhost:5173")
+	apiKey := config.GetEnv("API_KEY", "")
+	rateLimitRPS := config.GetEnvAsInt("RATE_LIMIT_RPS", 20)
+	rateLimitBurst := config.GetEnvAsInt("RATE_LIMIT_BURST", 40)
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: redisAddr,
@@ -57,6 +60,19 @@ func main() {
 	apiHandler := api.NewHandler(redisQueue, log, metricsCollector, workflowManager)
 
 	router := mux.NewRouter()
+
+	// Rate limit every request by client IP, then require an API key on
+	// mutating requests. Order matters: limit before auth so unauthenticated
+	// floods are shed cheaply.
+	router.Use(api.NewRateLimiter(float64(rateLimitRPS), float64(rateLimitBurst)).Middleware())
+	router.Use(api.APIKeyAuth(apiKey, log))
+
+	if apiKey == "" {
+		log.Error("API_KEY is not set — mutating endpoints (job submission, workflows) are UNAUTHENTICATED. Set API_KEY before exposing this service.")
+	} else {
+		log.Info("API key authentication enabled for mutating endpoints")
+	}
+
 	apiHandler.RegisterRoutes(router)
 	router.HandleFunc("/ws/jobs", websocketManager.HandleJobUpdatesWebSocket)
 

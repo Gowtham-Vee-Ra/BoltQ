@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+// `??` so an empty VITE_API_URL means "same origin" (served behind nginx);
+// undefined falls back to the dev API server.
+const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8080';
 
 /**
  * Custom hook for managing WebSocket connections
@@ -16,14 +18,13 @@ const useWebSocket = (path) => {
   const getWebSocketUrl = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     
-    // If we're using a relative URL or external URL
-    if (API_BASE_URL.startsWith('/')) {
-      return `${protocol}//${window.location.host}${API_BASE_URL}/ws${path}`;
-    } else {
-      // Extract host from API_BASE_URL for external URLs
-      const apiUrl = new URL(API_BASE_URL);
-      return `${protocol}//${apiUrl.host}/ws${path}`;
+    // Same-origin (empty or relative base): the ingress nginx proxies /ws.
+    if (!API_BASE_URL || API_BASE_URL.startsWith('/')) {
+      return `${protocol}//${window.location.host}/ws${path}`;
     }
+    // External base (dev): connect directly to the API host.
+    const apiUrl = new URL(API_BASE_URL);
+    return `${protocol}//${apiUrl.host}/ws${path}`;
   }, [path]);
 
   const connect = useCallback(() => {
